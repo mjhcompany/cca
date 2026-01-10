@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "cca": {
+      "command": "${CCA_HOME}/target/release/cca-mcp",
+      "args": ["--daemon-url", "http://127.0.0.1:9200"],
+      "env": {}
+    }
+  }
+}

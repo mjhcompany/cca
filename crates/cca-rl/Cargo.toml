@@ -1,0 +1,26 @@
+[package]
+name = "cca-rl"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CCA RL - Reinforcement Learning algorithms for task optimization"
+
+[dependencies]
+cca-core.workspace = true
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+
+# RL specific
+rand = "0.8"
+ndarray = "0.16"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

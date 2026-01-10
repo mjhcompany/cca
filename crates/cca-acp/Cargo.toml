@@ -1,0 +1,24 @@
+[package]
+name = "cca-acp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CCA ACP - Agent Client Protocol implementation"
+
+[dependencies]
+cca-core.workspace = true
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

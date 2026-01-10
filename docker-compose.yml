@@ -1,0 +1,72 @@
+services:
+  # PostgreSQL with pgvector extension
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: cca-postgres
+    environment:
+      POSTGRES_USER: cca
+      POSTGRES_PASSWORD: cca
+      POSTGRES_DB: cca
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cca -d cca"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis for session state and pub/sub
+  redis:
+    image: redis:7-alpine
+    container_name: cca-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis Commander (optional - for Redis debugging)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: cca-redis-commander
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports:
+      - "8082:8081"
+    depends_on:
+      - redis
+    profiles:
+      - debug
+
+  # pgAdmin (optional - for PostgreSQL debugging)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: cca-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@cca.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    ports:
+      - "8083:80"
+    depends_on:
+      - postgres
+    profiles:
+      - debug
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  default:
+    name: cca-network
