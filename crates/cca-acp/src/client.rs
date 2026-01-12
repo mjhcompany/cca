@@ -52,7 +52,7 @@ pub struct AcpClientConfig {
 impl Default for AcpClientConfig {
     fn default() -> Self {
         Self {
-            server_url: "ws://127.0.0.1:9100".to_string(),
+            server_url: "ws://127.0.0.1:8581".to_string(),
             reconnect_interval: Duration::from_secs(1),
             max_reconnect_attempts: 0, // Unlimited
             heartbeat_interval: Duration::from_secs(30),
@@ -458,7 +458,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_client_state() {
-        let client = AcpClient::new(AgentId::new(), "ws://localhost:9100");
+        let client = AcpClient::new(AgentId::new(), "ws://localhost:8581");
         assert_eq!(client.state().await, ConnectionState::Disconnected);
         assert!(!client.is_connected().await);
     }

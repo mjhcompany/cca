@@ -85,6 +85,11 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Get the daemon URL from environment or use default
+fn daemon_url() -> String {
+    std::env::var("CCA_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:8580".to_string())
+}
+
 async fn show_status() -> Result<()> {
     println!("CCA Status");
     println!("==========");
@@ -93,7 +98,7 @@ async fn show_status() -> Result<()> {
     println!("Daemon: checking...");
 
     // Try to connect to daemon
-    match reqwest::get("http://localhost:9200/health").await {
+    match reqwest::get(format!("{}/health", daemon_url())).await {
         Ok(resp) if resp.status().is_success() => {
             println!("Daemon: running");
         }

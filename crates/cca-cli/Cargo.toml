@@ -24,5 +24,7 @@ clap.workspace = true
 uuid.workspace = true
 reqwest.workspace = true
 dirs.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]

@@ -23,7 +23,7 @@ use cca_mcp::McpServer;
 #[command(version, about, long_about = None)]
 struct Args {
     /// CCA daemon URL
-    #[arg(short, long, default_value = "http://127.0.0.1:9200")]
+    #[arg(short, long, default_value = "http://127.0.0.1:8580")]
     daemon_url: String,
 
     /// Enable debug logging (writes to stderr)

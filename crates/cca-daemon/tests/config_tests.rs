@@ -8,7 +8,7 @@ use std::env;
 #[test]
 fn test_default_daemon_config() {
     // Test that default values are sensible
-    let default_bind = "127.0.0.1:9200";
+    let default_bind = "127.0.0.1:8580";
     let default_log_level = "info";
     let default_max_agents = 10;
 
@@ -20,7 +20,7 @@ fn test_default_daemon_config() {
 
 #[test]
 fn test_default_redis_config() {
-    let default_url = "redis://localhost:6380";
+    let default_url = "redis://localhost:16379";
     let default_pool_size = 10;
     let default_ttl = 3600;
 
@@ -31,7 +31,7 @@ fn test_default_redis_config() {
 
 #[test]
 fn test_default_postgres_config() {
-    let default_url = "postgres://cca:cca@localhost:5433/cca";
+    let default_url = "postgres://cca:cca@localhost:15432/cca";
     let default_pool_size = 10;
     let default_max_connections = 20;
 
@@ -42,7 +42,7 @@ fn test_default_postgres_config() {
 
 #[test]
 fn test_default_acp_config() {
-    let default_port = 9100;
+    let default_port = 8581;
     let default_reconnect_interval = 1000;
     let default_max_attempts = 5;
 
@@ -92,10 +92,10 @@ fn test_environment_separator() {
 fn test_bind_address_formats() {
     // Valid formats
     let valid_addresses = vec![
-        "127.0.0.1:9200",
+        "127.0.0.1:8580",
         "0.0.0.0:8080",
         "localhost:3000",
-        "[::1]:9200",
+        "[::1]:8580",
     ];
 
     for addr in valid_addresses {
@@ -192,7 +192,7 @@ fn test_pool_size_consistency() {
 
 #[test]
 fn test_websocket_port_range() {
-    let port = 9100u16;
+    let port = 8581u16;
 
     assert!(port > 1024); // Avoid privileged ports
     assert!(port < 65535);

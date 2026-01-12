@@ -26,7 +26,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod agent_manager;
@@ -51,43 +51,70 @@ async fn main() -> Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| format!("ccad={},tower_http=debug", config.daemon.log_level).into());
 
-    let registry = tracing_subscriber::registry().with(env_filter);
-
-    if !config.daemon.log_file.is_empty() {
-        // File logging enabled
+    let file_logging_enabled = if !config.daemon.log_file.is_empty() {
+        // Try to set up file logging
         let log_path = std::path::Path::new(&config.daemon.log_file);
         let log_dir = log_path.parent().unwrap_or(std::path::Path::new("."));
-        let log_filename = log_path.file_name()
+        let log_filename = log_path
+            .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("ccad.log");
 
-        // Create log directory if it doesn't exist
-        if !log_dir.exists() {
-            std::fs::create_dir_all(log_dir)?;
+        // Try to create log directory and test write permissions
+        let can_write = (|| -> std::io::Result<()> {
+            if !log_dir.exists() {
+                std::fs::create_dir_all(log_dir)?;
+            }
+            // Test write permissions
+            let test_path = log_dir.join(".write_test");
+            std::fs::write(&test_path, "test")?;
+            std::fs::remove_file(&test_path)?;
+            Ok(())
+        })();
+
+        match can_write {
+            Ok(()) => {
+                let file_appender = tracing_appender::rolling::never(log_dir, log_filename);
+                let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+                // Log to both file and stdout
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
+                    .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+                    .init();
+
+                // Keep guard alive for entire program - leak it intentionally
+                Box::leak(Box::new(_guard));
+                true
+            }
+            Err(e) => {
+                // Fall back to stdout-only logging
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(tracing_subscriber::fmt::layer())
+                    .init();
+                eprintln!(
+                    "Warning: Could not set up file logging to '{}': {}. Using stdout only.",
+                    config.daemon.log_file, e
+                );
+                false
+            }
         }
-
-        let file_appender = tracing_appender::rolling::never(log_dir, log_filename);
-        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-
-        // Log to both file and stdout
-        registry
-            .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
-            .init();
-
-        // Keep guard alive for entire program - leak it intentionally
-        // This is safe because the program runs until shutdown
-        Box::leak(Box::new(_guard));
     } else {
         // Stdout only
-        registry
+        tracing_subscriber::registry()
+            .with(env_filter)
             .with(tracing_subscriber::fmt::layer())
             .init();
-    }
+        false
+    };
 
     info!("Starting CCA Daemon v{}", env!("CARGO_PKG_VERSION"));
-    if !config.daemon.log_file.is_empty() {
+    if file_logging_enabled {
         info!("Logging to file: {}", config.daemon.log_file);
+    } else if !config.daemon.log_file.is_empty() {
+        warn!("File logging was configured but could not be enabled");
     }
     info!("Data directory: {:?}", config.daemon.get_data_dir());
     info!(

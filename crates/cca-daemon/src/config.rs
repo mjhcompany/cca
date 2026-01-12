@@ -63,7 +63,7 @@ where
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            bind_address: "127.0.0.1:9200".to_string(),
+            bind_address: "127.0.0.1:8580".to_string(),
             log_level: "info".to_string(),
             max_agents: 10,
             api_keys: Vec::new(),
@@ -171,7 +171,7 @@ pub struct AgentsConfig {
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
-            default_timeout_seconds: 300,
+            default_timeout_seconds: 600, // 10 minutes for complex analysis tasks
             context_compression: true,
             token_budget_per_task: 50000,
             claude_path: "claude".to_string(),
@@ -190,7 +190,7 @@ pub struct AcpConfig {
 impl Default for AcpConfig {
     fn default() -> Self {
         Self {
-            websocket_port: 9100,
+            websocket_port: 8581,
             reconnect_interval_ms: 1000,
             max_reconnect_attempts: 5,
         }

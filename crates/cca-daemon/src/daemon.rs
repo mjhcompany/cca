@@ -1134,6 +1134,13 @@ async fn create_task(
         Ok(output) if output.status.success() => {
             let coordinator_output = String::from_utf8_lossy(&output.stdout).to_string();
 
+            info!(
+                "Coordinator {} returned output ({} bytes) for task {}",
+                coordinator_id,
+                coordinator_output.len(),
+                task_id
+            );
+
             // Record coordinator result
             {
                 let mut manager = state.agent_manager.write().await;
@@ -1194,6 +1201,15 @@ async fn create_task(
                                     task.updated_at = Utc::now();
                                 }
                             }
+
+                            info!(
+                                "Task {} {}: {} delegation(s), {} succeeded, {} failed",
+                                task_id,
+                                if all_success { "completed" } else { "partially completed" },
+                                coord_response.delegations.len(),
+                                delegation_results.iter().filter(|r| r.success).count(),
+                                delegation_results.iter().filter(|r| !r.success).count()
+                            );
 
                             // Publish event
                             publish_task_event(
@@ -1285,7 +1301,11 @@ async fn create_task(
                 }
                 None => {
                     // Coordinator didn't return valid JSON, treat as direct response
-                    debug!("Coordinator output is not structured JSON, using as direct response");
+                    info!(
+                        "Task {} completed (non-JSON coordinator response, {} bytes output)",
+                        task_id,
+                        coordinator_output.len()
+                    );
 
                     // Update task state
                     {
@@ -1321,6 +1341,13 @@ async fn create_task(
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let error_msg = format!("Claude Code failed: {}", stderr);
 
+            error!(
+                "Task {} failed: coordinator {} returned non-zero exit code: {}",
+                task_id,
+                coordinator_id,
+                stderr.lines().next().unwrap_or("(no error message)")
+            );
+
             // Record in agent manager
             {
                 let mut manager = state.agent_manager.write().await;
@@ -1346,6 +1373,11 @@ async fn create_task(
             })
         }
         Err(e) => {
+            error!(
+                "Task {} failed: coordinator execution error: {}",
+                task_id, e
+            );
+
             // Record in agent manager
             {
                 let mut manager = state.agent_manager.write().await;
@@ -1455,8 +1487,8 @@ async fn execute_delegations(
         info!("Executing delegation to {}: {}", delegation.role,
               if delegation.task.len() > 50 { &delegation.task[..50] } else { &delegation.task });
 
-        // Parse role
-        let role = match delegation.role.to_lowercase().as_str() {
+        // Validate role (must be a known role)
+        let _role = match delegation.role.to_lowercase().as_str() {
             "frontend" => AgentRole::Frontend,
             "backend" => AgentRole::Backend,
             "dba" => AgentRole::DBA,
@@ -1478,147 +1510,65 @@ async fn execute_delegations(
 
         let start = std::time::Instant::now();
 
-        // Find or spawn agent
-        let agent_id = {
-            let manager = state.agent_manager.read().await;
-            manager.list().iter().find(|a| a.role == role).map(|a| a.id)
-        };
+        // Find a connected agent with this role via WebSocket
+        let agent_id = state.acp_server.find_agent_by_role(&delegation.role).await;
 
         let agent_id = match agent_id {
-            Some(id) => id,
+            Some(id) => {
+                info!("Found connected {} agent: {}", delegation.role, id);
+                id
+            }
             None => {
-                let mut manager = state.agent_manager.write().await;
-                match manager.spawn(role.clone()).await {
-                    Ok(id) => {
-                        info!("Spawned new {} agent: {}", delegation.role, id);
-                        id
-                    }
-                    Err(e) => {
-                        results.push(DelegateTaskResponse {
-                            success: false,
-                            agent_id: String::new(),
-                            role: delegation.role.clone(),
-                            output: None,
-                            error: Some(format!("Failed to spawn agent: {}", e)),
-                            duration_ms: start.elapsed().as_millis() as u64,
-                        });
-                        continue;
-                    }
-                }
+                warn!("No {} agent connected via WebSocket. Start one with: cca agent worker {}",
+                      delegation.role, delegation.role);
+                results.push(DelegateTaskResponse {
+                    success: false,
+                    agent_id: String::new(),
+                    role: delegation.role.clone(),
+                    output: None,
+                    error: Some(format!(
+                        "No {} agent connected. Start one with: cca agent worker {}",
+                        delegation.role, delegation.role
+                    )),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                });
+                continue;
             }
         };
 
-        // Prepare message with context
-        let message = if let Some(ref ctx) = delegation.context {
-            format!("{}\n\nContext:\n{}", delegation.task, ctx)
-        } else {
-            delegation.task.clone()
-        };
+        info!("Sending task to {} agent {} via WebSocket", delegation.role, agent_id);
 
-        // Prepare task
-        let config = {
-            let mut manager = state.agent_manager.write().await;
-            match manager.prepare_task(agent_id, &message) {
-                Ok(cfg) => cfg,
-                Err(e) => {
-                    results.push(DelegateTaskResponse {
-                        success: false,
-                        agent_id: agent_id.to_string(),
-                        role: delegation.role.clone(),
-                        output: None,
-                        error: Some(e.to_string()),
-                        duration_ms: start.elapsed().as_millis() as u64,
-                    });
-                    continue;
-                }
-            }
-        };
-
-        info!("Sending task to {} agent {}", config.role, agent_id);
-
-        // Execute Claude Code
-        let timeout = std::time::Duration::from_secs(180); // 3 minute timeout for delegated tasks
-        let result = tokio::time::timeout(timeout, async {
-            tokio::process::Command::new(&config.claude_path)
-                .arg("--dangerously-skip-permissions")
-                .arg("--print")
-                .arg("--output-format")
-                .arg("text")
-                .arg(&message)
-                .env("CLAUDE_MD", &config.claude_md_path)
-                .env("NO_COLOR", "1")
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| e.to_string())?
-                .wait_with_output()
-                .await
-                .map_err(|e| e.to_string())
-        })
-        .await;
+        // Send task via WebSocket
+        let timeout = std::time::Duration::from_secs(state.config.agents.default_timeout_seconds);
+        let result = state.acp_server.send_task(
+            agent_id,
+            &delegation.task,
+            delegation.context.as_deref(),
+            timeout,
+        ).await;
 
         // Record result
         match result {
-            Ok(Ok(output)) if output.status.success() => {
-                let response = String::from_utf8_lossy(&output.stdout).to_string();
-                {
-                    let mut manager = state.agent_manager.write().await;
-                    manager.record_task_result(agent_id, true, &response, None);
-                }
+            Ok(output) => {
                 info!("{} agent completed task in {}ms", delegation.role, start.elapsed().as_millis());
                 results.push(DelegateTaskResponse {
                     success: true,
                     agent_id: agent_id.to_string(),
                     role: delegation.role.clone(),
-                    output: Some(response),
+                    output: Some(output),
                     error: None,
                     duration_ms: start.elapsed().as_millis() as u64,
                 });
             }
-            Ok(Ok(output)) => {
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                {
-                    let mut manager = state.agent_manager.write().await;
-                    manager.record_task_result(agent_id, false, "", Some(&stderr));
-                }
-                warn!("{} agent failed: {}", delegation.role, stderr);
+            Err(e) => {
+                let error_msg = e.to_string();
+                warn!("{} agent error: {}", delegation.role, error_msg);
                 results.push(DelegateTaskResponse {
                     success: false,
                     agent_id: agent_id.to_string(),
                     role: delegation.role.clone(),
                     output: None,
-                    error: Some(stderr),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                });
-            }
-            Ok(Err(e)) => {
-                {
-                    let mut manager = state.agent_manager.write().await;
-                    manager.record_task_result(agent_id, false, "", Some(&e));
-                }
-                warn!("{} agent error: {}", delegation.role, e);
-                results.push(DelegateTaskResponse {
-                    success: false,
-                    agent_id: agent_id.to_string(),
-                    role: delegation.role.clone(),
-                    output: None,
-                    error: Some(e),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                });
-            }
-            Err(_) => {
-                {
-                    let mut manager = state.agent_manager.write().await;
-                    manager.add_log(agent_id, "ERROR", "Task timed out after 180 seconds");
-                    manager.clear_current_task(agent_id);
-                }
-                warn!("{} agent timed out", delegation.role);
-                results.push(DelegateTaskResponse {
-                    success: false,
-                    agent_id: agent_id.to_string(),
-                    role: delegation.role.clone(),
-                    output: None,
-                    error: Some("Timeout after 180 seconds".to_string()),
+                    error: Some(error_msg),
                     duration_ms: start.elapsed().as_millis() as u64,
                 });
             }
@@ -1817,14 +1767,24 @@ async fn memory_search(
 
 /// ACP WebSocket status endpoint
 async fn acp_status(State(state): State<DaemonState>) -> Json<serde_json::Value> {
-    let connected_agents = state.acp_server.connected_agents().await;
+    let agents_with_roles = state.acp_server.agents_with_roles().await;
     let connection_count = state.acp_server.connection_count().await;
+
+    let workers: Vec<serde_json::Value> = agents_with_roles
+        .iter()
+        .map(|(id, role)| {
+            serde_json::json!({
+                "agent_id": id.to_string(),
+                "role": role.clone().unwrap_or_else(|| "unregistered".to_string())
+            })
+        })
+        .collect();
 
     Json(serde_json::json!({
         "running": true,
         "port": state.config.acp.websocket_port,
         "connected_agents": connection_count,
-        "agent_ids": connected_agents.iter().map(std::string::ToString::to_string).collect::<Vec<_>>()
+        "workers": workers
     }))
 }
 
@@ -1942,14 +1902,14 @@ async fn get_workloads(State(state): State<DaemonState>) -> Json<serde_json::Val
         .list()
         .iter()
         .map(|a| {
-            // Count tasks assigned to this agent
+            // Count tasks assigned to this agent (running or in_progress)
             let current_tasks = tasks
                 .values()
                 .filter(|t| {
                     t.assigned_agent
                         .as_ref()
                         .is_some_and(|id| id == &a.id.to_string())
-                        && t.status == "in_progress"
+                        && (t.status == "running" || t.status == "in_progress")
                 })
                 .count();
 

@@ -7,6 +7,11 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+/// Get the daemon URL from environment or use default
+fn daemon_url() -> String {
+    std::env::var("CCA_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:8580".to_string())
+}
+
 #[derive(Subcommand)]
 pub enum DaemonCommands {
     /// Start the CCA daemon
@@ -110,9 +115,9 @@ async fn start(foreground: bool) -> Result<()> {
     }
 
     // Check if port is in use via health endpoint
-    if let Ok(resp) = reqwest::get("http://127.0.0.1:9200/health").await {
+    if let Ok(resp) = reqwest::get(format!("{}/health", daemon_url())).await {
         if resp.status().is_success() {
-            println!("CCA daemon appears to be running (responding on port 9200)");
+            println!("CCA daemon appears to be running at {}", daemon_url());
             return Ok(());
         }
     }
@@ -154,7 +159,7 @@ async fn start(foreground: bool) -> Result<()> {
 
             // Verify via health check
             for _ in 0..5 {
-                if let Ok(resp) = reqwest::get("http://127.0.0.1:9200/health").await {
+                if let Ok(resp) = reqwest::get(format!("{}/health", daemon_url())).await {
                     if resp.status().is_success() {
                         println!("Daemon is healthy and accepting connections");
                         return Ok(());
@@ -176,7 +181,7 @@ async fn start(foreground: bool) -> Result<()> {
 
 async fn stop() -> Result<()> {
     // First check via API
-    if let Ok(resp) = reqwest::get("http://127.0.0.1:9200/health").await {
+    if let Ok(resp) = reqwest::get(format!("{}/health", daemon_url())).await {
         if resp.status().is_success() {
             println!("Sending shutdown signal to daemon...");
 
@@ -254,7 +259,7 @@ async fn status() -> Result<()> {
         "PID: none".to_string()
     };
 
-    match reqwest::get("http://127.0.0.1:9200/api/v1/status").await {
+    match reqwest::get(format!("{}/api/v1/status", daemon_url())).await {
         Ok(resp) if resp.status().is_success() => {
             let status: serde_json::Value = resp.json().await?;
             println!("Status: running");

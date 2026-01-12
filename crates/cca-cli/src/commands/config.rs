@@ -52,10 +52,10 @@ async fn show() -> Result<()> {
 
     println!("No configuration file found. Using defaults.");
     println!("\nDefault values:");
-    println!("  daemon.bind_address = 127.0.0.1:9200");
+    println!("  daemon.bind_address = 127.0.0.1:8580");
     println!("  daemon.max_agents = 10");
-    println!("  redis.url = redis://localhost:6379");
-    println!("  postgres.url = postgres://cca:cca@localhost:5432/cca");
+    println!("  redis.url = redis://localhost:16379");
+    println!("  postgres.url = postgres://cca:cca@localhost:15432/cca");
 
     Ok(())
 }
@@ -81,17 +81,17 @@ async fn init(force: bool) -> Result<()> {
     // If example doesn't exist yet, create a basic one
     let config = if default_config.is_empty() {
         r#"[daemon]
-bind_address = "127.0.0.1:9200"
+bind_address = "127.0.0.1:8580"
 log_level = "info"
 max_agents = 10
 
 [redis]
-url = "redis://localhost:6379"
+url = "redis://localhost:16379"
 pool_size = 10
 context_ttl_seconds = 3600
 
 [postgres]
-url = "postgres://cca:cca@localhost:5432/cca"
+url = "postgres://cca:cca@localhost:15432/cca"
 pool_size = 10
 max_connections = 20
 
@@ -101,13 +101,13 @@ context_compression = true
 token_budget_per_task = 50000
 
 [acp]
-websocket_port = 9100
+websocket_port = 8581
 reconnect_interval_ms = 1000
 max_reconnect_attempts = 5
 
 [mcp]
 enabled = true
-bind_address = "127.0.0.1:9201"
+bind_address = "127.0.0.1:8582"
 
 [learning]
 enabled = true

@@ -236,7 +236,7 @@ fn test_request_channel_closed() {
 
 #[test]
 fn test_client_config_defaults() {
-    let default_port = 9100u16;
+    let default_port = 8581u16;
     let default_reconnect_interval = 1000u64;
     let default_max_attempts = 5u32;
 
@@ -248,8 +248,8 @@ fn test_client_config_defaults() {
 #[test]
 fn test_server_url_format() {
     let valid_urls = vec![
-        "ws://localhost:9100",
-        "ws://127.0.0.1:9100",
+        "ws://localhost:8581",
+        "ws://127.0.0.1:8581",
         "wss://secure.example.com:443",
     ];
 

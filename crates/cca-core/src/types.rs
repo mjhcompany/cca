@@ -139,17 +139,17 @@ impl Default for CCAConfig {
     fn default() -> Self {
         Self {
             daemon: DaemonConfig {
-                bind_address: "127.0.0.1:9200".to_string(),
+                bind_address: "127.0.0.1:8580".to_string(),
                 log_level: "info".to_string(),
                 max_agents: 10,
             },
             redis: RedisConfig {
-                url: "redis://localhost:6380".to_string(),
+                url: "redis://localhost:16379".to_string(),
                 pool_size: 10,
                 context_ttl_seconds: 3600,
             },
             postgres: PostgresConfig {
-                url: "postgres://cca:cca@localhost:5433/cca".to_string(),
+                url: "postgres://cca:cca@localhost:15432/cca".to_string(),
                 pool_size: 10,
                 max_connections: 20,
             },
@@ -159,13 +159,13 @@ impl Default for CCAConfig {
                 token_budget_per_task: 50000,
             },
             acp: AcpConfig {
-                websocket_port: 9100,
+                websocket_port: 8581,
                 reconnect_interval_ms: 1000,
                 max_reconnect_attempts: 5,
             },
             mcp: McpConfig {
                 enabled: true,
-                bind_address: "127.0.0.1:9201".to_string(),
+                bind_address: "127.0.0.1:8582".to_string(),
             },
             learning: LearningConfig {
                 enabled: true,

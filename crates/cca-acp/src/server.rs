@@ -23,6 +23,7 @@ use crate::message::{methods, HeartbeatParams, HeartbeatResponse};
 /// Connection state for a single agent
 pub struct AgentConnection {
     pub agent_id: AgentId,
+    pub role: Option<String>,
     pub sender: mpsc::Sender<String>,
     pub connected_at: std::time::Instant,
     pub last_heartbeat: std::time::Instant,
@@ -34,11 +35,17 @@ impl AgentConnection {
         let now = std::time::Instant::now();
         Self {
             agent_id,
+            role: None,
             sender,
             connected_at: now,
             last_heartbeat: now,
             metadata: HashMap::new(),
         }
+    }
+
+    fn with_role(mut self, role: impl Into<String>) -> Self {
+        self.role = Some(role.into());
+        self
     }
 
     pub fn uptime_seconds(&self) -> u64 {
@@ -84,6 +91,27 @@ impl DefaultHandler {
     pub fn new(connections: Arc<RwLock<HashMap<AgentId, AgentConnection>>>) -> Self {
         Self { connections }
     }
+
+    async fn handle_register(&self, from: AgentId, params: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+        if let Some(params) = params {
+            if let Some(role) = params.get("role").and_then(|r| r.as_str()) {
+                let mut conns = self.connections.write().await;
+                if let Some(conn) = conns.get_mut(&from) {
+                    conn.role = Some(role.to_string());
+                    info!("Agent {} registered with role: {}", from, role);
+                }
+                return Some(serde_json::json!({
+                    "success": true,
+                    "agent_id": from.to_string(),
+                    "role": role
+                }));
+            }
+        }
+        Some(serde_json::json!({
+            "success": false,
+            "error": "Missing role parameter"
+        }))
+    }
 }
 
 #[async_trait::async_trait]
@@ -93,6 +121,10 @@ impl MessageHandler for DefaultHandler {
         let id = message.id.as_ref()?;
 
         match method {
+            "agent.register" => {
+                let result = self.handle_register(from, message.params.as_ref()).await;
+                result.map(|r| AcpMessage::response(id, r))
+            }
             methods::HEARTBEAT => {
                 // Parse heartbeat params
                 let params: HeartbeatParams = message
@@ -338,13 +370,83 @@ impl AcpServer {
     pub async fn connection_count(&self) -> usize {
         self.connections.read().await.len()
     }
+
+    /// Find an agent by role
+    pub async fn find_agent_by_role(&self, role: &str) -> Option<AgentId> {
+        let connections = self.connections.read().await;
+        connections
+            .values()
+            .find(|conn| conn.role.as_deref() == Some(role))
+            .map(|conn| conn.agent_id)
+    }
+
+    /// Get all agents with their roles
+    pub async fn agents_with_roles(&self) -> Vec<(AgentId, Option<String>)> {
+        let connections = self.connections.read().await;
+        connections
+            .values()
+            .map(|conn| (conn.agent_id, conn.role.clone()))
+            .collect()
+    }
+
+    /// Register an agent with a role (called when agent sends register message)
+    pub async fn register_agent_role(&self, agent_id: AgentId, role: &str) {
+        let mut connections = self.connections.write().await;
+        if let Some(conn) = connections.get_mut(&agent_id) {
+            conn.role = Some(role.to_string());
+            info!("Agent {} registered with role: {}", agent_id, role);
+        }
+    }
+
+    /// Send a task to an agent and wait for response
+    pub async fn send_task(
+        &self,
+        agent_id: AgentId,
+        task: &str,
+        context: Option<&str>,
+        timeout: Duration,
+    ) -> Result<String> {
+        let params = serde_json::json!({
+            "task": task,
+            "context": context
+        });
+
+        let response = self
+            .request(agent_id, "task.execute", params, timeout)
+            .await?;
+
+        // Extract result from response
+        if let Some(result) = response.result {
+            if let Some(output) = result.get("output").and_then(|v: &serde_json::Value| v.as_str()) {
+                return Ok(output.to_string());
+            }
+            if result.get("success").and_then(|v: &serde_json::Value| v.as_bool()) == Some(true) {
+                return Ok(result.to_string());
+            }
+        }
+
+        if let Some(error) = response.error {
+            return Err(anyhow::anyhow!(
+                "Task execution failed: {}",
+                error.message
+            ));
+        }
+
+        Err(anyhow::anyhow!("Invalid response from agent"))
+    }
 }
 
 async fn cleanup_pending_requests(pending: &Arc<RwLock<HashMap<String, PendingRequest>>>) {
     let mut pending = pending.write().await;
-    let stale_timeout = Duration::from_secs(60);
+    // Use 15 minutes for stale timeout - must be longer than task execution timeout
+    let stale_timeout = Duration::from_secs(900);
 
+    let before = pending.len();
     pending.retain(|_id, req| req.created_at.elapsed() < stale_timeout);
+    let removed = before - pending.len();
+    if removed > 0 {
+        info!("Cleaned up {} stale pending requests", removed);
+    }
 }
 
 async fn handle_connection(
