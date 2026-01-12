@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "cca": {
-      "command": "/home/mjh/code/cca/target/debug/cca-mcp",
-      "args": ["--daemon-url", "http://127.0.0.1:9200"]
-    }
-  }
-}
