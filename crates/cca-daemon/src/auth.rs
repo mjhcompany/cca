@@ -32,7 +32,7 @@ impl Default for AuthConfig {
 }
 
 /// Paths that bypass authentication
-const BYPASS_PATHS: &[&str] = &["/health"];
+const BYPASS_PATHS: &[&str] = &["/health", "/api/v1/health"];
 
 /// Authentication middleware function
 ///

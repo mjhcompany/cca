@@ -17,10 +17,65 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use std::path::Path;
 
 mod commands;
 
 use commands::{agent, config, daemon, memory, task};
+
+/// Load environment variables from CCA env file if not already set
+fn load_env_file() {
+    // Check standard locations for env file
+    let env_paths = [
+        "/usr/local/etc/cca/cca.env".to_string(),
+        dirs::config_dir()
+            .map(|p| p.join("cca/cca.env").to_string_lossy().to_string())
+            .unwrap_or_default(),
+        dirs::home_dir()
+            .map(|p| p.join(".config/cca/cca.env").to_string_lossy().to_string())
+            .unwrap_or_default(),
+    ];
+
+    for path in &env_paths {
+        if path.is_empty() {
+            continue;
+        }
+        if Path::new(path).exists() {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                parse_env_file(&contents);
+            }
+            break;
+        }
+    }
+}
+
+/// Parse env file contents and set environment variables (only if not already set)
+fn parse_env_file(contents: &str) {
+    for line in contents.lines() {
+        let line = line.trim();
+
+        // Skip comments and empty lines
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Handle export VAR=value or VAR=value
+        let line = line.strip_prefix("export ").unwrap_or(line);
+
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+
+            // Remove quotes if present
+            let value = value.trim_matches('"').trim_matches('\'');
+
+            // Only set if not already defined
+            if std::env::var(key).is_err() {
+                std::env::set_var(key, value);
+            }
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "cca")]
@@ -62,6 +117,9 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load environment from cca.env file (before parsing args)
+    load_env_file();
+
     let cli = Cli::parse();
 
     // Initialize logging based on verbosity
@@ -98,7 +156,7 @@ async fn show_status() -> Result<()> {
     println!("Daemon: checking...");
 
     // Try to connect to daemon
-    match reqwest::get(format!("{}/health", daemon_url())).await {
+    match reqwest::get(format!("{}/api/v1/health", daemon_url())).await {
         Ok(resp) if resp.status().is_success() => {
             println!("Daemon: running");
         }

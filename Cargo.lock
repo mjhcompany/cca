@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "cca-acp"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "cca-cli"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cca-core",
@@ -367,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "cca-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -381,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "cca-daemon"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -416,11 +416,12 @@ dependencies = [
 
 [[package]]
 name = "cca-mcp"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cca-core",
  "clap",
+ "dirs",
  "futures-util",
  "reqwest",
  "serde",
@@ -435,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "cca-rl"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cca-core",

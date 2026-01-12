@@ -24,6 +24,7 @@ uuid.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 clap.workspace = true
+dirs.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

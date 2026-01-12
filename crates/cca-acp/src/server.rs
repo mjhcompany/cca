@@ -43,11 +43,6 @@ impl AgentConnection {
         }
     }
 
-    fn with_role(mut self, role: impl Into<String>) -> Self {
-        self.role = Some(role.into());
-        self
-    }
-
     pub fn uptime_seconds(&self) -> u64 {
         self.connected_at.elapsed().as_secs()
     }
@@ -395,6 +390,17 @@ impl AcpServer {
         if let Some(conn) = connections.get_mut(&agent_id) {
             conn.role = Some(role.to_string());
             info!("Agent {} registered with role: {}", agent_id, role);
+        }
+    }
+
+    /// Disconnect an agent
+    pub async fn disconnect(&self, agent_id: AgentId) -> Result<()> {
+        let mut connections = self.connections.write().await;
+        if connections.remove(&agent_id).is_some() {
+            info!("Agent {} disconnected", agent_id);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Agent {} not found", agent_id))
         }
     }
 

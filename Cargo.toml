@@ -11,9 +11,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
-authors = ["CCA Team"]
+authors = ["Maciej J. Hajduk"]
 license = "MIT"
 repository = "https://github.com/your-org/cca"
 rust-version = "1.75"

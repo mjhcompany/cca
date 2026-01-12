@@ -1,7 +1,8 @@
 # CCA Makefile
 # Common commands for building, testing, and installing CCA
 
-.PHONY: all build release test clean install uninstall docker-up docker-down help
+.PHONY: all build release release-quick test clean install uninstall docker-up docker-down \
+        start stop status workers diag fmt lint ci help
 
 # Default target
 all: build
@@ -10,8 +11,12 @@ all: build
 build:
 	cargo build --workspace
 
-# Build release binaries
-release:
+# Build release binaries (clean first to ensure fresh build)
+release: clean
+	cargo build --release --workspace
+
+# Quick release build (incremental, no clean)
+release-quick:
 	cargo build --release --workspace
 
 # Run all tests
@@ -38,13 +43,25 @@ docker-up:
 docker-down:
 	docker-compose down
 
-# Start the daemon (must be installed first)
+# Start the daemon
 start:
 	ccad
 
+# Stop the daemon
+stop:
+	cca daemon stop
+
 # Check daemon status
 status:
-	@curl -s http://127.0.0.1:8580/api/v1/health 2>/dev/null || echo "Daemon not running"
+	@cca daemon status
+
+# List connected workers
+workers:
+	@cca agent list
+
+# Run diagnostics
+diag:
+	@cca agent diag
 
 # Format code
 fmt:
@@ -60,16 +77,32 @@ ci: fmt lint test
 # Help
 help:
 	@echo "CCA Makefile targets:"
-	@echo "  make build     - Build debug binaries"
-	@echo "  make release   - Build release binaries"
-	@echo "  make test      - Run all tests"
-	@echo "  make clean     - Clean build artifacts"
-	@echo "  make install   - Build release and install (runs install.sh)"
-	@echo "  make uninstall - Uninstall CCA (runs uninstall.sh)"
-	@echo "  make docker-up - Start Docker services"
+	@echo ""
+	@echo "Build:"
+	@echo "  make build         - Build debug binaries"
+	@echo "  make release       - Clean + build release (always fresh)"
+	@echo "  make release-quick - Build release (incremental)"
+	@echo "  make test          - Run all tests"
+	@echo "  make clean      - Clean build artifacts"
+	@echo "  make fmt        - Format code"
+	@echo "  make lint       - Run clippy lints"
+	@echo "  make ci         - Run CI checks (fmt, lint, test)"
+	@echo ""
+	@echo "Install:"
+	@echo "  make install    - Build release and install"
+	@echo "  make uninstall  - Uninstall CCA"
+	@echo ""
+	@echo "Docker:"
+	@echo "  make docker-up  - Start Redis and PostgreSQL"
 	@echo "  make docker-down - Stop Docker services"
-	@echo "  make start     - Start the daemon"
-	@echo "  make status    - Check daemon status"
-	@echo "  make fmt       - Format code"
-	@echo "  make lint      - Run clippy lints"
-	@echo "  make ci        - Run CI checks (fmt, lint, test)"
+	@echo ""
+	@echo "Runtime:"
+	@echo "  make start      - Start the daemon (ccad)"
+	@echo "  make stop       - Stop the daemon"
+	@echo "  make status     - Show daemon status"
+	@echo "  make workers    - List connected workers"
+	@echo "  make diag       - Run diagnostics"
+	@echo ""
+	@echo "Start workers in separate terminals:"
+	@echo "  cca agent worker coordinator"
+	@echo "  cca agent worker backend"

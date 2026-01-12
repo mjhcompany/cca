@@ -115,7 +115,7 @@ async fn start(foreground: bool) -> Result<()> {
     }
 
     // Check if port is in use via health endpoint
-    if let Ok(resp) = reqwest::get(format!("{}/health", daemon_url())).await {
+    if let Ok(resp) = reqwest::get(format!("{}/api/v1/health", daemon_url())).await {
         if resp.status().is_success() {
             println!("CCA daemon appears to be running at {}", daemon_url());
             return Ok(());
@@ -159,7 +159,7 @@ async fn start(foreground: bool) -> Result<()> {
 
             // Verify via health check
             for _ in 0..5 {
-                if let Ok(resp) = reqwest::get(format!("{}/health", daemon_url())).await {
+                if let Ok(resp) = reqwest::get(format!("{}/api/v1/health", daemon_url())).await {
                     if resp.status().is_success() {
                         println!("Daemon is healthy and accepting connections");
                         return Ok(());
@@ -181,7 +181,7 @@ async fn start(foreground: bool) -> Result<()> {
 
 async fn stop() -> Result<()> {
     // First check via API
-    if let Ok(resp) = reqwest::get(format!("{}/health", daemon_url())).await {
+    if let Ok(resp) = reqwest::get(format!("{}/api/v1/health", daemon_url())).await {
         if resp.status().is_success() {
             println!("Sending shutdown signal to daemon...");
 

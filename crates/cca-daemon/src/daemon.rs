@@ -221,6 +221,7 @@ fn create_router(state: DaemonState) -> Router {
 
     Router::new()
         .route("/health", get(health_check))
+        .route("/api/v1/health", get(health_check))
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/agents", get(list_agents))
         .route("/api/v1/agents", post(spawn_agent))
@@ -237,6 +238,8 @@ fn create_router(state: DaemonState) -> Router {
         .route("/api/v1/memory/search", post(memory_search))
         .route("/api/v1/pubsub/broadcast", post(pubsub_broadcast))
         .route("/api/v1/acp/status", get(acp_status))
+        .route("/api/v1/acp/disconnect", post(acp_disconnect))
+        .route("/api/v1/acp/send", post(acp_send_task))
         .route("/api/v1/broadcast", post(broadcast_all))
         .route("/api/v1/workloads", get(get_workloads))
         .route("/api/v1/rl/stats", get(rl_stats))
@@ -1006,78 +1009,32 @@ async fn create_task(
 
     info!("Task created: {} - {}", task_id, request.description);
 
-    // Step 1: Find or spawn a Coordinator (brief locks only)
-    let (coordinator_id, config) = {
-        // Check for existing coordinator
-        let existing_id = {
-            let manager = state.agent_manager.read().await;
-            manager
-                .list()
-                .iter()
-                .find(|a| matches!(a.role, AgentRole::Coordinator))
-                .map(|a| a.id)
-        };
-
-        let coordinator_id = match existing_id {
-            Some(id) => id,
-            None => {
-                // Spawn new coordinator
-                let mut manager = state.agent_manager.write().await;
-                match manager.spawn(AgentRole::Coordinator).await {
-                    Ok(id) => id,
-                    Err(e) => {
-                        let error_msg = format!("Failed to spawn Coordinator: {e}");
-                        {
-                            let mut tasks = state.tasks.write().await;
-                            if let Some(task) = tasks.get_mut(&task_id) {
-                                task.status = "failed".to_string();
-                                task.error = Some(error_msg.clone());
-                                task.updated_at = Utc::now();
-                            }
-                        }
-                        return Json(TaskResponse {
-                            task_id,
-                            status: "failed".to_string(),
-                            output: None,
-                            error: Some(error_msg),
-                            assigned_agent: None,
-                        });
-                    }
+    // Step 1: Find connected coordinator worker via WebSocket
+    let coordinator_id = match state.acp_server.find_agent_by_role("coordinator").await {
+        Some(id) => {
+            info!("Found connected coordinator worker: {}", id);
+            id
+        }
+        None => {
+            let error_msg = "No coordinator worker connected. Start one with: cca agent worker coordinator".to_string();
+            warn!("{}", error_msg);
+            {
+                let mut tasks = state.tasks.write().await;
+                if let Some(task) = tasks.get_mut(&task_id) {
+                    task.status = "failed".to_string();
+                    task.error = Some(error_msg.clone());
+                    task.updated_at = Utc::now();
                 }
             }
-        };
-
-        // Prepare task (brief write lock)
-        let mut config = {
-            let mut manager = state.agent_manager.write().await;
-            match manager.prepare_task(coordinator_id, &request.description) {
-                Ok(cfg) => cfg,
-                Err(e) => {
-                    let error_msg = e.to_string();
-                    {
-                        let mut tasks = state.tasks.write().await;
-                        if let Some(task) = tasks.get_mut(&task_id) {
-                            task.status = "failed".to_string();
-                            task.error = Some(error_msg.clone());
-                            task.updated_at = Utc::now();
-                        }
-                    }
-                    return Json(TaskResponse {
-                        task_id,
-                        status: "failed".to_string(),
-                        output: None,
-                        error: Some(error_msg),
-                        assigned_agent: None,
-                    });
-                }
-            }
-        };
-
-        // Set coordinator system prompt to enforce JSON delegation output
-        config.system_prompt = Some(COORDINATOR_SYSTEM_PROMPT.to_string());
-
-        (coordinator_id, config)
-    }; // All locks released here
+            return Json(TaskResponse {
+                task_id,
+                status: "failed".to_string(),
+                output: None,
+                error: Some(error_msg),
+                assigned_agent: None,
+            });
+        }
+    };
 
     // Update task to running status
     {
@@ -1090,62 +1047,30 @@ async fn create_task(
     }
 
     info!(
-        "Sending task to {} agent {}: {}",
-        config.role,
+        "Sending task to coordinator {} via WebSocket: {}",
         coordinator_id,
         if request.description.len() > 100 { &request.description[..100] } else { &request.description }
     );
 
-    warn!(
-        "Agent {} running with --dangerously-skip-permissions. \
-         Ensure environment is properly sandboxed.",
-        coordinator_id
-    );
-
-    // Step 2: Execute Claude Code (Coordinator) WITHOUT holding any locks
-    let mut cmd = tokio::process::Command::new(&config.claude_path);
-    cmd.arg("--dangerously-skip-permissions")
-        .arg("--print")
-        .arg("--output-format")
-        .arg("text");
-
-    // Add system prompt if provided (critical for coordinator)
-    if let Some(ref system_prompt) = config.system_prompt {
-        cmd.arg("--system-prompt").arg(system_prompt);
-    }
-
-    cmd.arg(&request.description)
-        .env("CLAUDE_MD", &config.claude_md_path)
-        .env("NO_COLOR", "1")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    let result = cmd.spawn()
-        .map_err(|e| e.to_string())
-        .and_then(|child| Ok(child));
-
-    let result = match result {
-        Ok(child) => child.wait_with_output().await.map_err(|e| e.to_string()),
-        Err(e) => Err(e),
-    };
+    // Step 2: Send task to coordinator via WebSocket
+    // Include the coordinator system prompt as context
+    let timeout = std::time::Duration::from_secs(state.config.agents.default_timeout_seconds);
+    let result = state.acp_server.send_task(
+        coordinator_id,
+        &request.description,
+        Some(COORDINATOR_SYSTEM_PROMPT),
+        timeout,
+    ).await;
 
     // Step 3: Process coordinator's response
     match result {
-        Ok(output) if output.status.success() => {
-            let coordinator_output = String::from_utf8_lossy(&output.stdout).to_string();
-
+        Ok(coordinator_output) => {
             info!(
                 "Coordinator {} returned output ({} bytes) for task {}",
                 coordinator_id,
                 coordinator_output.len(),
                 task_id
             );
-
-            // Record coordinator result
-            {
-                let mut manager = state.agent_manager.write().await;
-                manager.record_task_result(coordinator_id, true, &coordinator_output, None);
-            }
 
             // Try to parse coordinator's JSON response
             // Extract JSON from output (coordinator might include markdown or other text)
@@ -1337,22 +1262,12 @@ async fn create_task(
                 }
             }
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let error_msg = format!("Claude Code failed: {}", stderr);
-
+        Err(e) => {
+            let error_msg = format!("Coordinator error: {}", e);
             error!(
-                "Task {} failed: coordinator {} returned non-zero exit code: {}",
-                task_id,
-                coordinator_id,
-                stderr.lines().next().unwrap_or("(no error message)")
+                "Task {} failed: coordinator {} error: {}",
+                task_id, coordinator_id, e
             );
-
-            // Record in agent manager
-            {
-                let mut manager = state.agent_manager.write().await;
-                manager.record_task_result(coordinator_id, false, "", Some(&stderr));
-            }
 
             // Update task state
             {
@@ -1370,36 +1285,6 @@ async fn create_task(
                 output: None,
                 error: Some(error_msg),
                 assigned_agent: Some(coordinator_id.to_string()),
-            })
-        }
-        Err(e) => {
-            error!(
-                "Task {} failed: coordinator execution error: {}",
-                task_id, e
-            );
-
-            // Record in agent manager
-            {
-                let mut manager = state.agent_manager.write().await;
-                manager.record_task_result(coordinator_id, false, "", Some(&e));
-            }
-
-            // Update task state
-            {
-                let mut tasks = state.tasks.write().await;
-                if let Some(task) = tasks.get_mut(&task_id) {
-                    task.status = "failed".to_string();
-                    task.error = Some(e.clone());
-                    task.updated_at = Utc::now();
-                }
-            }
-
-            Json(TaskResponse {
-                task_id,
-                status: "failed".to_string(),
-                output: None,
-                error: Some(e),
-                assigned_agent: None,
             })
         }
     }
@@ -1786,6 +1671,102 @@ async fn acp_status(State(state): State<DaemonState>) -> Json<serde_json::Value>
         "connected_agents": connection_count,
         "workers": workers
     }))
+}
+
+/// ACP disconnect request
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcpDisconnectRequest {
+    pub agent_id: String,
+}
+
+/// Disconnect an agent worker
+async fn acp_disconnect(
+    State(state): State<DaemonState>,
+    Json(request): Json<AcpDisconnectRequest>,
+) -> Json<serde_json::Value> {
+    let agent_id = match Uuid::parse_str(&request.agent_id) {
+        Ok(uuid) => AgentId(uuid),
+        Err(_) => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid agent ID: {}", request.agent_id)
+            }));
+        }
+    };
+
+    match state.acp_server.disconnect(agent_id).await {
+        Ok(()) => {
+            info!("Agent {} disconnected via API", agent_id);
+            Json(serde_json::json!({
+                "success": true,
+                "message": format!("Agent {} disconnected", agent_id)
+            }))
+        }
+        Err(e) => {
+            Json(serde_json::json!({
+                "success": false,
+                "error": e.to_string()
+            }))
+        }
+    }
+}
+
+/// ACP send task request
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcpSendTaskRequest {
+    pub agent_id: String,
+    pub task: String,
+    pub context: Option<String>,
+}
+
+/// Send a task to a specific worker
+async fn acp_send_task(
+    State(state): State<DaemonState>,
+    Json(request): Json<AcpSendTaskRequest>,
+) -> Json<serde_json::Value> {
+    // Input validation
+    if request.task.len() > MAX_TASK_DESCRIPTION_LEN {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": format!(
+                "Task too long: {} bytes (max: {} bytes)",
+                request.task.len(),
+                MAX_TASK_DESCRIPTION_LEN
+            )
+        }));
+    }
+
+    let agent_id = match Uuid::parse_str(&request.agent_id) {
+        Ok(uuid) => AgentId(uuid),
+        Err(_) => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid agent ID: {}", request.agent_id)
+            }));
+        }
+    };
+
+    let timeout = std::time::Duration::from_secs(state.config.agents.default_timeout_seconds);
+
+    match state.acp_server.send_task(
+        agent_id,
+        &request.task,
+        request.context.as_deref(),
+        timeout,
+    ).await {
+        Ok(output) => {
+            Json(serde_json::json!({
+                "success": true,
+                "output": output
+            }))
+        }
+        Err(e) => {
+            Json(serde_json::json!({
+                "success": false,
+                "error": e.to_string()
+            }))
+        }
+    }
 }
 
 /// Broadcast request
