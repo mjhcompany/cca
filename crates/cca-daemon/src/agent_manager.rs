@@ -2,10 +2,12 @@
 //!
 //! Uses portable-pty to spawn Claude Code instances in pseudo-terminals,
 //! enabling proper interactive communication with the agents.
+//!
+//! Note: Some methods are infrastructure for future features and not yet called.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::thread;
 
 use anyhow::{anyhow, Context, Result};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
@@ -95,8 +97,18 @@ impl AgentManager {
 
         // Build command for Claude Code
         let claude_md_path = format!("agents/{}.md", agent.role);
+        let claude_path = &self.config.agents.claude_path;
 
-        let mut cmd = CommandBuilder::new("claude");
+        info!("Using Claude Code binary: {}", claude_path);
+        let mut cmd = CommandBuilder::new(claude_path);
+
+        // SECURITY WARNING: This flag bypasses Claude Code permission prompts.
+        // Only use in sandboxed/trusted environments. See SECURITY_REVIEW.md.
+        warn!(
+            "Agent {} spawning with --dangerously-skip-permissions. \
+             Ensure environment is properly sandboxed.",
+            agent.id
+        );
         cmd.arg("--dangerously-skip-permissions");
         cmd.env("CLAUDE_MD", &claude_md_path);
         // Ensure non-interactive mode indicators
@@ -125,10 +137,11 @@ impl AgentManager {
         let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(32);
         let (stdout_tx, stdout_rx) = mpsc::channel::<String>(32);
 
-        // Spawn thread to write to PTY stdin
-        thread::spawn(move || {
+        // Spawn blocking task to write to PTY stdin
+        // Uses tokio's blocking thread pool for better integration with async runtime
+        tokio::task::spawn_blocking(move || {
             while let Some(msg) = stdin_rx.blocking_recv() {
-                if let Err(e) = writeln!(writer, "{}", msg) {
+                if let Err(e) = writeln!(writer, "{msg}") {
                     error!("Failed to write to PTY: {}", e);
                     break;
                 }
@@ -140,8 +153,9 @@ impl AgentManager {
             }
         });
 
-        // Spawn thread to read from PTY stdout
-        thread::spawn(move || {
+        // Spawn blocking task to read from PTY stdout
+        // Uses tokio's blocking thread pool for better integration with async runtime
+        tokio::task::spawn_blocking(move || {
             let buf_reader = BufReader::new(reader);
             for line in buf_reader.lines() {
                 match line {
@@ -171,7 +185,7 @@ impl AgentManager {
         let managed = self
             .agents
             .get_mut(&agent_id)
-            .ok_or_else(|| anyhow!("Agent {} not found", agent_id))?;
+            .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
 
         info!("Stopping agent {}", agent_id);
 
@@ -215,12 +229,12 @@ impl AgentManager {
         let managed = self
             .agents
             .get_mut(&agent_id)
-            .ok_or_else(|| anyhow!("Agent {} not found", agent_id))?;
+            .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
 
         let pty = managed
             .pty_handle
             .as_mut()
-            .ok_or_else(|| anyhow!("Agent {} has no PTY handle", agent_id))?;
+            .ok_or_else(|| anyhow!("Agent {agent_id} has no PTY handle"))?;
 
         // Send message to PTY
         pty.stdin_tx

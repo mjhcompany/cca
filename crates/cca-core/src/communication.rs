@@ -99,11 +99,11 @@ pub mod channels {
     pub const LEARNING: &str = "cca:learning";
 
     pub fn agent_tasks(agent_id: &str) -> String {
-        format!("cca:tasks:{}", agent_id)
+        format!("cca:tasks:{agent_id}")
     }
 
     pub fn agent_status(agent_id: &str) -> String {
-        format!("cca:status:{}", agent_id)
+        format!("cca:status:{agent_id}")
     }
 }
 

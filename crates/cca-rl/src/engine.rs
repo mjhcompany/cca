@@ -46,7 +46,7 @@ impl RLEngine {
             info!("Active algorithm set to: {}", name);
             Ok(())
         } else {
-            Err(anyhow!("Unknown algorithm: {}", name))
+            Err(anyhow!("Unknown algorithm: {name}"))
         }
     }
 
@@ -57,7 +57,7 @@ impl RLEngine {
 
     /// List available algorithms
     pub fn list_algorithms(&self) -> Vec<&str> {
-        self.algorithms.keys().map(|s| s.as_str()).collect()
+        self.algorithms.keys().map(std::string::String::as_str).collect()
     }
 
     /// Record an experience
@@ -90,8 +90,7 @@ impl RLEngine {
     pub fn predict(&self, state: &State) -> Action {
         self.algorithms
             .get(&self.active_algorithm)
-            .map(|alg| alg.predict(state))
-            .unwrap_or(Action::RouteToAgent(cca_core::AgentRole::Coordinator))
+            .map_or(Action::RouteToAgent(cca_core::AgentRole::Coordinator), |alg| alg.predict(state))
     }
 
     /// Update after receiving reward
@@ -124,8 +123,7 @@ impl RLEngine {
     pub fn get_algorithm_params(&self) -> serde_json::Value {
         self.algorithms
             .get(&self.active_algorithm)
-            .map(|alg| alg.get_params())
-            .unwrap_or(serde_json::Value::Null)
+            .map_or(serde_json::Value::Null, |alg| alg.get_params())
     }
 
     /// Set algorithm parameters

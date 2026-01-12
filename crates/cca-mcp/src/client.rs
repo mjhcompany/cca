@@ -58,12 +58,113 @@ impl DaemonClient {
 
     /// Get task status
     pub async fn get_task(&self, task_id: &str) -> Result<TaskResponse> {
-        self.get(&format!("/api/v1/tasks/{}", task_id)).await
+        self.get(&format!("/api/v1/tasks/{task_id}")).await
     }
 
     /// Get activity of all agents
     pub async fn get_activity(&self) -> Result<ActivityResponse> {
         self.get("/api/v1/activity").await
+    }
+
+    /// Get ACP WebSocket server status
+    pub async fn get_acp_status(&self) -> Result<AcpStatusResponse> {
+        self.get("/api/v1/acp/status").await
+    }
+
+    /// Broadcast a message to all agents
+    pub async fn broadcast(&self, message: &str) -> Result<BroadcastResponse> {
+        self.post(
+            "/api/v1/broadcast",
+            &serde_json::json!({ "message": message }),
+        )
+        .await
+    }
+
+    /// Get workload distribution across agents
+    pub async fn get_workloads(&self) -> Result<WorkloadsResponse> {
+        self.get("/api/v1/workloads").await
+    }
+
+    /// Get PostgreSQL status
+    pub async fn get_postgres_status(&self) -> Result<PostgresStatusResponse> {
+        self.get("/api/v1/postgres/status").await
+    }
+
+    /// Search memory (ReasoningBank patterns)
+    pub async fn search_memory(&self, query: &str, limit: i32) -> Result<MemorySearchResponse> {
+        self.post(
+            "/api/v1/memory/search",
+            &serde_json::json!({ "query": query, "limit": limit }),
+        )
+        .await
+    }
+
+    /// Get RL stats
+    pub async fn get_rl_stats(&self) -> Result<RLStatsResponse> {
+        self.get("/api/v1/rl/stats").await
+    }
+
+    /// Trigger RL training
+    pub async fn rl_train(&self) -> Result<RLTrainResponse> {
+        self.post("/api/v1/rl/train", &serde_json::json!({})).await
+    }
+
+    /// Set RL algorithm
+    pub async fn set_rl_algorithm(&self, algorithm: &str) -> Result<RLAlgorithmResponse> {
+        self.post(
+            "/api/v1/rl/algorithm",
+            &serde_json::json!({ "algorithm": algorithm }),
+        )
+        .await
+    }
+
+    /// Get RL algorithm parameters
+    pub async fn get_rl_params(&self) -> Result<RLParamsResponse> {
+        self.get("/api/v1/rl/params").await
+    }
+
+    /// Set RL algorithm parameters
+    pub async fn set_rl_params(&self, params: serde_json::Value) -> Result<RLParamsResponse> {
+        self.post("/api/v1/rl/params", &params).await
+    }
+
+    /// Analyze context for token usage
+    pub async fn tokens_analyze(&self, content: &str, agent_id: Option<&str>) -> Result<TokenAnalysisResponse> {
+        self.post(
+            "/api/v1/tokens/analyze",
+            &serde_json::json!({ "content": content, "agent_id": agent_id }),
+        )
+        .await
+    }
+
+    /// Compress context with strategies
+    pub async fn tokens_compress(
+        &self,
+        content: &str,
+        strategies: Option<Vec<String>>,
+        target_reduction: Option<f64>,
+        agent_id: Option<&str>,
+    ) -> Result<TokenCompressResponse> {
+        self.post(
+            "/api/v1/tokens/compress",
+            &serde_json::json!({
+                "content": content,
+                "strategies": strategies,
+                "target_reduction": target_reduction,
+                "agent_id": agent_id
+            }),
+        )
+        .await
+    }
+
+    /// Get token efficiency metrics
+    pub async fn tokens_metrics(&self) -> Result<TokenMetricsResponse> {
+        self.get("/api/v1/tokens/metrics").await
+    }
+
+    /// Get token optimization recommendations
+    pub async fn tokens_recommendations(&self) -> Result<TokenRecommendationsResponse> {
+        self.get("/api/v1/tokens/recommendations").await
     }
 
     /// Generic GET request
@@ -81,7 +182,7 @@ impl DaemonClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Request failed ({}): {}", status, body);
+            anyhow::bail!("Request failed ({status}): {body}");
         }
 
         response.json().await.context("Failed to parse response")
@@ -103,7 +204,7 @@ impl DaemonClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Request failed ({}): {}", status, body);
+            anyhow::bail!("Request failed ({status}): {body}");
         }
 
         response.json().await.context("Failed to parse response")
@@ -133,7 +234,7 @@ pub struct AgentsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
-    pub id: String,
+    pub agent_id: String,
     pub role: String,
     pub status: String,
     #[serde(default)]
@@ -175,4 +276,212 @@ pub struct AgentActivity {
     pub current_task: Option<String>,
     #[serde(default)]
     pub last_activity: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpStatusResponse {
+    pub running: bool,
+    pub port: u16,
+    pub connected_agents: usize,
+    #[serde(default)]
+    pub agent_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BroadcastResponse {
+    pub success: bool,
+    pub agents_notified: usize,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkloadsResponse {
+    pub agents: Vec<AgentWorkload>,
+    pub total_tasks: usize,
+    pub pending_tasks: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentWorkload {
+    pub agent_id: String,
+    pub role: String,
+    pub current_tasks: u32,
+    pub max_tasks: u32,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostgresStatusResponse {
+    pub connected: bool,
+    #[serde(default)]
+    pub pool_size: Option<u32>,
+    #[serde(default)]
+    pub patterns_count: Option<i64>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemorySearchResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub patterns: Vec<PatternResult>,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatternResult {
+    pub id: String,
+    pub pattern_type: String,
+    pub content: String,
+    #[serde(default)]
+    pub success_rate: Option<f64>,
+    #[serde(default)]
+    pub success_count: i32,
+    #[serde(default)]
+    pub failure_count: i32,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RLStatsResponse {
+    pub algorithm: String,
+    #[serde(default)]
+    pub total_steps: u64,
+    #[serde(default)]
+    pub total_rewards: f64,
+    #[serde(default)]
+    pub average_reward: f64,
+    #[serde(default)]
+    pub buffer_size: usize,
+    #[serde(default)]
+    pub last_training_loss: f64,
+    #[serde(default)]
+    pub experience_count: usize,
+    #[serde(default)]
+    pub algorithms_available: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RLTrainResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub loss: f64,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RLAlgorithmResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub algorithm: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RLParamsResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub params: serde_json::Value,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+// Token efficiency response types
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenAnalysisResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub token_count: u32,
+    #[serde(default)]
+    pub repeated_lines: usize,
+    #[serde(default)]
+    pub compression_potential: f64,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenCompressResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub original_tokens: u32,
+    #[serde(default)]
+    pub final_tokens: u32,
+    #[serde(default)]
+    pub tokens_saved: u32,
+    #[serde(default)]
+    pub reduction: String,
+    #[serde(default)]
+    pub compressed_content: String,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenMetricsResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub total_tokens_used: u64,
+    #[serde(default)]
+    pub total_tokens_saved: u64,
+    #[serde(default)]
+    pub efficiency_percent: f64,
+    #[serde(default)]
+    pub agent_count: usize,
+    #[serde(default)]
+    pub agents: Vec<AgentTokenMetrics>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTokenMetrics {
+    pub agent_id: String,
+    #[serde(default)]
+    pub tokens_used: u64,
+    #[serde(default)]
+    pub tokens_saved: u64,
+    #[serde(default)]
+    pub requests: u64,
+    #[serde(default)]
+    pub efficiency: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenRecommendationsResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub recommendations: Vec<TokenRecommendation>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenRecommendation {
+    pub category: String,
+    pub message: String,
+    #[serde(default)]
+    pub priority: String,
+    #[serde(default)]
+    pub potential_savings: Option<String>,
 }

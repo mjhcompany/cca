@@ -52,15 +52,15 @@ pub async fn run(cmd: MemoryCommands) -> Result<()> {
 
 async fn store(pattern: &str, pattern_type: &str) -> Result<()> {
     println!("Storing pattern...");
-    println!("Type: {}", pattern_type);
-    println!("Content: {}", pattern);
+    println!("Type: {pattern_type}");
+    println!("Content: {pattern}");
     // TODO: Call daemon API
     println!("Pattern stored: <pattern-id>");
     Ok(())
 }
 
 async fn search(query: &str, limit: usize) -> Result<()> {
-    println!("Searching patterns: \"{}\" (limit: {})\n", query, limit);
+    println!("Searching patterns: \"{query}\" (limit: {limit})\n");
     println!(
         "{:<36} {:<12} {:<10} {:<30}",
         "ID", "TYPE", "SCORE", "CONTENT"
@@ -90,14 +90,14 @@ async fn stats() -> Result<()> {
 }
 
 async fn export(output: &str) -> Result<()> {
-    println!("Exporting patterns to {}...", output);
+    println!("Exporting patterns to {output}...");
     // TODO: Implement export
     println!("Export complete: 0 patterns");
     Ok(())
 }
 
 async fn import(input: &str) -> Result<()> {
-    println!("Importing patterns from {}...", input);
+    println!("Importing patterns from {input}...");
     // TODO: Implement import
     println!("Import complete: 0 patterns");
     Ok(())

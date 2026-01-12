@@ -43,9 +43,9 @@ async fn show() -> Result<()> {
 
     for path in config_paths.iter().flatten() {
         if std::path::Path::new(path).exists() {
-            println!("Config file: {}\n", path);
+            println!("Config file: {path}\n");
             let content = std::fs::read_to_string(path)?;
-            println!("{}", content);
+            println!("{content}");
             return Ok(());
         }
     }
@@ -61,7 +61,7 @@ async fn show() -> Result<()> {
 }
 
 async fn set(key: &str, value: &str) -> Result<()> {
-    println!("Setting {} = {}", key, value);
+    println!("Setting {key} = {value}");
     // TODO: Implement config modification
     println!("Configuration updated");
     Ok(())
@@ -71,7 +71,7 @@ async fn init(force: bool) -> Result<()> {
     let config_path = "cca.toml";
 
     if std::path::Path::new(config_path).exists() && !force {
-        println!("Configuration file already exists: {}", config_path);
+        println!("Configuration file already exists: {config_path}");
         println!("Use --force to overwrite");
         return Ok(());
     }
@@ -125,7 +125,7 @@ compression_algorithm = "context_distillation"
     };
 
     std::fs::write(config_path, config)?;
-    println!("Configuration file created: {}", config_path);
+    println!("Configuration file created: {config_path}");
 
     Ok(())
 }

@@ -61,7 +61,7 @@ impl QLearning {
 }
 
 impl RLAlgorithm for QLearning {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "q_learning"
     }
 
@@ -81,7 +81,7 @@ impl RLAlgorithm for QLearning {
                 exp.reward
             } else if let Some(ref next_state) = exp.next_state {
                 let next_q = self.get_q_values(next_state);
-                let max_next_q = next_q.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let max_next_q = next_q.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 exp.reward + self.discount_factor * max_next_q
             } else {
                 exp.reward
@@ -117,8 +117,7 @@ impl RLAlgorithm for QLearning {
                 .iter()
                 .enumerate()
                 .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+                .map_or(0, |(i, _)| i);
             Action::from_index(best_idx)
                 .unwrap_or(Action::RouteToAgent(cca_core::AgentRole::Coordinator))
         }
@@ -182,7 +181,7 @@ impl Default for PPO {
 }
 
 impl RLAlgorithm for PPO {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "ppo"
     }
     fn train(&mut self, _: &[Experience]) -> Result<f64> {
@@ -220,7 +219,7 @@ impl Default for DQN {
 }
 
 impl RLAlgorithm for DQN {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "dqn"
     }
     fn train(&mut self, _: &[Experience]) -> Result<f64> {

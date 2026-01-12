@@ -33,7 +33,7 @@ pub enum DaemonCommands {
 
 fn get_pid_file() -> PathBuf {
     dirs::runtime_dir()
-        .or_else(|| dirs::data_local_dir())
+        .or_else(dirs::data_local_dir)
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("cca")
         .join("ccad.pid")
@@ -58,7 +58,7 @@ fn write_pid(pid: u32) -> Result<()> {
     if let Some(parent) = pid_file.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(pid_file, format!("{}", pid))?;
+    fs::write(pid_file, format!("{pid}"))?;
     Ok(())
 }
 
@@ -102,12 +102,11 @@ async fn start(foreground: bool) -> Result<()> {
     // Check if already running
     if let Some(pid) = read_pid() {
         if is_process_running(pid) {
-            println!("CCA daemon is already running (PID: {})", pid);
+            println!("CCA daemon is already running (PID: {pid})");
             return Ok(());
-        } else {
-            // Stale PID file
-            remove_pid()?;
         }
+        // Stale PID file
+        remove_pid()?;
     }
 
     // Check if port is in use via health endpoint
@@ -150,7 +149,7 @@ async fn start(foreground: bool) -> Result<()> {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         if is_process_running(pid) {
-            println!("CCA daemon started (PID: {})", pid);
+            println!("CCA daemon started (PID: {pid})");
             println!("Logs: {}", log_file.display());
 
             // Verify via health check
@@ -247,9 +246,9 @@ async fn status() -> Result<()> {
     // Check PID file
     let pid_info = if let Some(pid) = read_pid() {
         if is_process_running(pid) {
-            format!("PID: {} (running)", pid)
+            format!("PID: {pid} (running)")
         } else {
-            format!("PID: {} (stale)", pid)
+            format!("PID: {pid} (stale)")
         }
     } else {
         "PID: none".to_string()
@@ -259,7 +258,7 @@ async fn status() -> Result<()> {
         Ok(resp) if resp.status().is_success() => {
             let status: serde_json::Value = resp.json().await?;
             println!("Status: running");
-            println!("{}", pid_info);
+            println!("{pid_info}");
             println!(
                 "Version: {}",
                 status["version"].as_str().unwrap_or("unknown")
@@ -279,7 +278,7 @@ async fn status() -> Result<()> {
         }
         _ => {
             println!("Status: not running");
-            println!("{}", pid_info);
+            println!("{pid_info}");
             println!("\nStart with: cca daemon start");
         }
     }
@@ -315,11 +314,11 @@ async fn logs(lines: usize, follow: bool) -> Result<()> {
             println!("Log following not supported on this platform");
         }
     } else {
-        println!("Last {} lines of daemon logs:\n", lines);
+        println!("Last {lines} lines of daemon logs:\n");
 
         let file = fs::File::open(&log_file).context("Failed to open log file")?;
         let reader = BufReader::new(file);
-        let all_lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+        let all_lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
 
         let start = if all_lines.len() > lines {
             all_lines.len() - lines
@@ -328,7 +327,7 @@ async fn logs(lines: usize, follow: bool) -> Result<()> {
         };
 
         for line in &all_lines[start..] {
-            println!("{}", line);
+            println!("{line}");
         }
     }
 

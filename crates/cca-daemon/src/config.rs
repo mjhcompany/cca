@@ -7,7 +7,7 @@ use config::{ConfigBuilder, Environment, File};
 use serde::Deserialize;
 
 /// Configuration for the daemon
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub daemon: DaemonConfig,
@@ -25,6 +25,35 @@ pub struct DaemonConfig {
     pub bind_address: String,
     pub log_level: String,
     pub max_agents: usize,
+    /// API keys for authentication (set via CCA__DAEMON__API_KEYS as comma-separated list)
+    #[serde(default, deserialize_with = "deserialize_api_keys")]
+    pub api_keys: Vec<String>,
+    /// Whether authentication is required for API endpoints
+    pub require_auth: bool,
+}
+
+/// Deserialize API keys from comma-separated string or array
+fn deserialize_api_keys<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ApiKeys {
+        String(String),
+        Array(Vec<String>),
+    }
+
+    match ApiKeys::deserialize(deserializer)? {
+        ApiKeys::String(s) => {
+            if s.is_empty() {
+                Ok(Vec::new())
+            } else {
+                Ok(s.split(',').map(|s| s.trim().to_string()).collect())
+            }
+        }
+        ApiKeys::Array(arr) => Ok(arr),
+    }
 }
 
 impl Default for DaemonConfig {
@@ -33,6 +62,8 @@ impl Default for DaemonConfig {
             bind_address: "127.0.0.1:9200".to_string(),
             log_level: "info".to_string(),
             max_agents: 10,
+            api_keys: Vec::new(),
+            require_auth: false, // Disabled by default for development
         }
     }
 }
@@ -48,7 +79,9 @@ pub struct RedisConfig {
 impl Default for RedisConfig {
     fn default() -> Self {
         Self {
-            url: "redis://localhost:6380".to_string(),
+            // Empty by default - must be explicitly configured
+            // Set via CCA__REDIS__URL environment variable
+            url: String::new(),
             pool_size: 10,
             context_ttl_seconds: 3600,
         }
@@ -66,7 +99,10 @@ pub struct PostgresConfig {
 impl Default for PostgresConfig {
     fn default() -> Self {
         Self {
-            url: "postgres://cca:cca@localhost:5433/cca".to_string(),
+            // Empty by default - must be explicitly configured
+            // Set via CCA__POSTGRES__URL environment variable
+            // SECURITY: Never use hardcoded credentials in production
+            url: String::new(),
             pool_size: 10,
             max_connections: 20,
         }
@@ -79,6 +115,9 @@ pub struct AgentsConfig {
     pub default_timeout_seconds: u64,
     pub context_compression: bool,
     pub token_budget_per_task: u64,
+    /// Path to the Claude Code binary (defaults to "claude" which must be in PATH)
+    /// Set via CCA__AGENTS__CLAUDE_PATH environment variable if claude is not in PATH
+    pub claude_path: String,
 }
 
 impl Default for AgentsConfig {
@@ -87,6 +126,7 @@ impl Default for AgentsConfig {
             default_timeout_seconds: 300,
             context_compression: true,
             token_budget_per_task: 50000,
+            claude_path: "claude".to_string(),
         }
     }
 }
@@ -145,19 +185,6 @@ impl Default for LearningConfig {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            daemon: DaemonConfig::default(),
-            redis: RedisConfig::default(),
-            postgres: PostgresConfig::default(),
-            agents: AgentsConfig::default(),
-            acp: AcpConfig::default(),
-            mcp: McpConfig::default(),
-            learning: LearningConfig::default(),
-        }
-    }
-}
 
 impl Config {
     /// Load configuration from file and environment
@@ -183,9 +210,34 @@ impl Config {
 
         let config = builder.build()?;
 
-        config
+        let config: Config = config
             .try_deserialize()
-            .context("Failed to deserialize configuration")
+            .context("Failed to deserialize configuration")?;
+
+        // Warn about unconfigured services
+        if config.redis.url.is_empty() {
+            tracing::warn!(
+                "Redis URL not configured. Set CCA__REDIS__URL or redis.url in config file. \
+                 Redis features will be disabled."
+            );
+        }
+
+        if config.postgres.url.is_empty() {
+            tracing::warn!(
+                "PostgreSQL URL not configured. Set CCA__POSTGRES__URL or postgres.url in config file. \
+                 PostgreSQL features will be disabled."
+            );
+        }
+
+        // Warn about auth configuration
+        if config.daemon.require_auth && config.daemon.api_keys.is_empty() {
+            tracing::warn!(
+                "Authentication is required but no API keys configured. \
+                 Set CCA__DAEMON__API_KEYS to enable API access."
+            );
+        }
+
+        Ok(config)
     }
 
     /// Find the configuration file

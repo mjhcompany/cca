@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use tracing::info;
 
 use crate::client::{CreateTaskRequest, DaemonClient};
-use crate::types::*;
+use crate::types::{McpTool, PatternMatch, MemoryResult};
 
 /// Registry of available MCP tools
 pub struct ToolRegistry {
@@ -81,6 +81,128 @@ impl ToolRegistry {
                     "required": ["query"]
                 }),
             },
+            McpTool {
+                name: "cca_acp_status".to_string(),
+                description: "Get ACP WebSocket server status - shows connected agents and real-time communication status.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            McpTool {
+                name: "cca_broadcast".to_string(),
+                description: "Broadcast a message to all connected agents.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "description": "Message to broadcast to all agents"
+                        }
+                    },
+                    "required": ["message"]
+                }),
+            },
+            McpTool {
+                name: "cca_workloads".to_string(),
+                description: "Get current workload distribution across all agents.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            McpTool {
+                name: "cca_rl_status".to_string(),
+                description: "Get RL (Reinforcement Learning) engine status - shows algorithm, training stats, and experience buffer.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            McpTool {
+                name: "cca_rl_train".to_string(),
+                description: "Trigger RL training on collected experiences.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            McpTool {
+                name: "cca_rl_algorithm".to_string(),
+                description: "Set the RL algorithm to use. Available: q_learning, dqn, ppo.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "algorithm": {
+                            "type": "string",
+                            "description": "The RL algorithm to use (q_learning, dqn, ppo)"
+                        }
+                    },
+                    "required": ["algorithm"]
+                }),
+            },
+            // Token efficiency tools
+            McpTool {
+                name: "cca_tokens_analyze".to_string(),
+                description: "Analyze content for token usage - counts tokens, detects redundancy, and estimates compression potential.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "The content to analyze for token usage"
+                        },
+                        "agent_id": {
+                            "type": "string",
+                            "description": "Optional agent ID to associate with analysis"
+                        }
+                    },
+                    "required": ["content"]
+                }),
+            },
+            McpTool {
+                name: "cca_tokens_compress".to_string(),
+                description: "Compress content using various strategies (code_comments, history, summarize, deduplicate). Targets 30%+ token reduction.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "The content to compress"
+                        },
+                        "strategies": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Compression strategies: code_comments, history, summarize, deduplicate (default: all)"
+                        },
+                        "target_reduction": {
+                            "type": "number",
+                            "description": "Target reduction as decimal 0.0-1.0 (default: 0.3 for 30%)"
+                        },
+                        "agent_id": {
+                            "type": "string",
+                            "description": "Optional agent ID to track savings"
+                        }
+                    },
+                    "required": ["content"]
+                }),
+            },
+            McpTool {
+                name: "cca_tokens_metrics".to_string(),
+                description: "Get token efficiency metrics - total usage, savings, and per-agent breakdown.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            McpTool {
+                name: "cca_tokens_recommendations".to_string(),
+                description: "Get recommendations for improving token efficiency based on current usage patterns.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
         ];
 
         Self { tools }
@@ -106,7 +228,17 @@ impl ToolRegistry {
             "cca_activity" => self.call_activity(&client).await,
             "cca_agents" => self.call_agents(&client).await,
             "cca_memory" => self.call_memory(arguments, &client).await,
-            _ => Err(anyhow!("Unknown tool: {}", name)),
+            "cca_acp_status" => self.call_acp_status(&client).await,
+            "cca_broadcast" => self.call_broadcast(arguments, &client).await,
+            "cca_workloads" => self.call_workloads(&client).await,
+            "cca_rl_status" => self.call_rl_status(&client).await,
+            "cca_rl_train" => self.call_rl_train(&client).await,
+            "cca_rl_algorithm" => self.call_rl_algorithm(arguments, &client).await,
+            "cca_tokens_analyze" => self.call_tokens_analyze(arguments, &client).await,
+            "cca_tokens_compress" => self.call_tokens_compress(arguments, &client).await,
+            "cca_tokens_metrics" => self.call_tokens_metrics(&client).await,
+            "cca_tokens_recommendations" => self.call_tokens_recommendations(&client).await,
+            _ => Err(anyhow!("Unknown tool: {name}")),
         }
     }
 
@@ -210,20 +342,251 @@ impl ToolRegistry {
     async fn call_memory(
         &self,
         arguments: &serde_json::Value,
-        _client: &DaemonClient,
+        client: &DaemonClient,
     ) -> Result<String> {
         let query = arguments["query"]
             .as_str()
             .ok_or_else(|| anyhow!("query is required"))?;
 
-        let limit = arguments["limit"].as_u64().unwrap_or(10) as usize;
+        let limit = arguments["limit"].as_i64().unwrap_or(10) as i32;
 
         info!("Memory query: {} (limit: {})", query, limit);
 
-        // Memory queries will be implemented when we add PostgreSQL/pgvector
-        // For now, return empty results
-        let response = MemoryResult { patterns: vec![] };
-        Ok(serde_json::to_string_pretty(&response)?)
+        // Check daemon health first
+        if !client.health().await? {
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": "CCA daemon is not running. Start it with: cca daemon start"
+            }))?);
+        }
+
+        // Query the ReasoningBank via the daemon
+        match client.search_memory(query, limit).await {
+            Ok(response) => {
+                // Convert to MemoryResult format for compatibility
+                let patterns: Vec<PatternMatch> = response
+                    .patterns
+                    .iter()
+                    .map(|p| PatternMatch {
+                        id: p.id.clone(),
+                        pattern_type: p.pattern_type.clone(),
+                        content: p.content.clone(),
+                        score: 1.0, // Text search doesn't have similarity score
+                        success_rate: p.success_rate.unwrap_or(0.0),
+                    })
+                    .collect();
+
+                let result = MemoryResult { patterns };
+                Ok(serde_json::to_string_pretty(&result)?)
+            }
+            Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": format!("Failed to search memory: {}", e)
+            }))?),
+        }
+    }
+
+    async fn call_acp_status(&self, client: &DaemonClient) -> Result<String> {
+        if !client.health().await? {
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": "CCA daemon is not running. Start it with: cca daemon start"
+            }))?);
+        }
+
+        match client.get_acp_status().await {
+            Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
+            Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": format!("Failed to get ACP status: {}", e)
+            }))?),
+        }
+    }
+
+    async fn call_broadcast(
+        &self,
+        arguments: &serde_json::Value,
+        client: &DaemonClient,
+    ) -> Result<String> {
+        let message = arguments["message"]
+            .as_str()
+            .ok_or_else(|| anyhow!("message is required"))?;
+
+        if !client.health().await? {
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": "CCA daemon is not running. Start it with: cca daemon start"
+            }))?);
+        }
+
+        info!("Broadcasting message: {}", message);
+
+        match client.broadcast(message).await {
+            Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
+            Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": format!("Failed to broadcast: {}", e)
+            }))?),
+        }
+    }
+
+    async fn call_workloads(&self, client: &DaemonClient) -> Result<String> {
+        if !client.health().await? {
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": "CCA daemon is not running. Start it with: cca daemon start"
+            }))?);
+        }
+
+        match client.get_workloads().await {
+            Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
+            Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": format!("Failed to get workloads: {}", e)
+            }))?),
+        }
+    }
+
+    async fn call_rl_status(&self, client: &DaemonClient) -> Result<String> {
+        if !client.health().await? {
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": "CCA daemon is not running. Start it with: cca daemon start"
+            }))?);
+        }
+
+        match client.get_rl_stats().await {
+            Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
+            Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": format!("Failed to get RL stats: {}", e)
+            }))?),
+        }
+    }
+
+    async fn call_rl_train(&self, client: &DaemonClient) -> Result<String> {
+        if !client.health().await? {
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": "CCA daemon is not running. Start it with: cca daemon start"
+            }))?);
+        }
+
+        info!("Triggering RL training");
+
+        match client.rl_train().await {
+            Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
+            Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": format!("Failed to train: {}", e)
+            }))?),
+        }
+    }
+
+    async fn call_rl_algorithm(
+        &self,
+        arguments: &serde_json::Value,
+        client: &DaemonClient,
+    ) -> Result<String> {
+        let algorithm = arguments["algorithm"]
+            .as_str()
+            .ok_or_else(|| anyhow!("algorithm is required"))?;
+
+        if !client.health().await? {
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": "CCA daemon is not running. Start it with: cca daemon start"
+            }))?);
+        }
+
+        info!("Setting RL algorithm to: {}", algorithm);
+
+        match client.set_rl_algorithm(algorithm).await {
+            Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
+            Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": format!("Failed to set algorithm: {}", e)
+            }))?),
+        }
+    }
+
+    async fn call_tokens_analyze(
+        &self,
+        arguments: &serde_json::Value,
+        client: &DaemonClient,
+    ) -> Result<String> {
+        let content = arguments["content"]
+            .as_str()
+            .ok_or_else(|| anyhow!("content is required"))?;
+
+        let agent_id = arguments["agent_id"].as_str();
+
+        if !client.health().await? {
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": "CCA daemon is not running. Start it with: cca daemon start"
+            }))?);
+        }
+
+        info!("Analyzing context for token usage");
+
+        match client.tokens_analyze(content, agent_id).await {
+            Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
+            Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": format!("Failed to analyze tokens: {}", e)
+            }))?),
+        }
+    }
+
+    async fn call_tokens_compress(
+        &self,
+        arguments: &serde_json::Value,
+        client: &DaemonClient,
+    ) -> Result<String> {
+        let content = arguments["content"]
+            .as_str()
+            .ok_or_else(|| anyhow!("content is required"))?;
+
+        let strategies: Option<Vec<String>> = arguments["strategies"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            });
+
+        let target_reduction = arguments["target_reduction"].as_f64();
+        let agent_id = arguments["agent_id"].as_str();
+
+        if !client.health().await? {
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": "CCA daemon is not running. Start it with: cca daemon start"
+            }))?);
+        }
+
+        info!("Compressing context");
+
+        match client.tokens_compress(content, strategies, target_reduction, agent_id).await {
+            Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
+            Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": format!("Failed to compress: {}", e)
+            }))?),
+        }
+    }
+
+    async fn call_tokens_metrics(&self, client: &DaemonClient) -> Result<String> {
+        if !client.health().await? {
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": "CCA daemon is not running. Start it with: cca daemon start"
+            }))?);
+        }
+
+        match client.tokens_metrics().await {
+            Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
+            Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": format!("Failed to get metrics: {}", e)
+            }))?),
+        }
+    }
+
+    async fn call_tokens_recommendations(&self, client: &DaemonClient) -> Result<String> {
+        if !client.health().await? {
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": "CCA daemon is not running. Start it with: cca daemon start"
+            }))?);
+        }
+
+        match client.tokens_recommendations().await {
+            Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
+            Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": format!("Failed to get recommendations: {}", e)
+            }))?),
+        }
     }
 }
 

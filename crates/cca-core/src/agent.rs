@@ -57,7 +57,7 @@ impl std::fmt::Display for AgentRole {
             AgentRole::DevOps => write!(f, "devops"),
             AgentRole::Security => write!(f, "security"),
             AgentRole::QA => write!(f, "qa"),
-            AgentRole::Custom(name) => write!(f, "{}", name),
+            AgentRole::Custom(name) => write!(f, "{name}"),
         }
     }
 }
@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn test_agent_id_display() {
         let id = AgentId::new();
-        let display = format!("{}", id);
+        let display = format!("{id}");
         assert!(!display.is_empty());
         assert!(display.contains('-')); // UUID format
     }

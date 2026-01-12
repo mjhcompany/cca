@@ -50,7 +50,7 @@ pub enum AgentCommands {
 }
 
 async fn check_daemon() -> Result<()> {
-    let resp = reqwest::get(format!("{}/health", DAEMON_URL))
+    let resp = reqwest::get(format!("{DAEMON_URL}/health"))
         .await
         .context("Could not connect to CCA daemon. Is it running?")?;
 
@@ -84,10 +84,10 @@ async fn spawn(role: &str, name: Option<String>) -> Result<()> {
         body["name"] = serde_json::json!(n);
     }
 
-    println!("Spawning {} agent{}...", role, name.as_ref().map(|n| format!(" ({})", n)).unwrap_or_default());
+    println!("Spawning {} agent{}...", role, name.as_ref().map(|n| format!(" ({n})")).unwrap_or_default());
 
     let resp = client
-        .post(format!("{}/api/v1/agents", DAEMON_URL))
+        .post(format!("{DAEMON_URL}/api/v1/agents"))
         .json(&body)
         .send()
         .await
@@ -98,12 +98,12 @@ async fn spawn(role: &str, name: Option<String>) -> Result<()> {
         println!("Agent spawned successfully");
         println!("ID: {}", data["agent_id"].as_str().unwrap_or("unknown"));
         if let Some(state) = data["state"].as_str() {
-            println!("State: {}", state);
+            println!("State: {state}");
         }
     } else {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        println!("Failed to spawn agent: {} - {}", status, body);
+        println!("Failed to spawn agent: {status} - {body}");
     }
 
     Ok(())
@@ -114,10 +114,10 @@ async fn stop(id: &str) -> Result<()> {
 
     let client = Client::new();
 
-    println!("Stopping agent {}...", id);
+    println!("Stopping agent {id}...");
 
     let resp = client
-        .delete(format!("{}/api/v1/agents/{}", DAEMON_URL, id))
+        .delete(format!("{DAEMON_URL}/api/v1/agents/{id}"))
         .send()
         .await
         .context("Failed to send stop request")?;
@@ -127,7 +127,7 @@ async fn stop(id: &str) -> Result<()> {
     } else {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        println!("Failed to stop agent: {} - {}", status, body);
+        println!("Failed to stop agent: {status} - {body}");
     }
 
     Ok(())
@@ -136,7 +136,7 @@ async fn stop(id: &str) -> Result<()> {
 async fn list() -> Result<()> {
     check_daemon().await?;
 
-    let resp = reqwest::get(format!("{}/api/v1/agents", DAEMON_URL))
+    let resp = reqwest::get(format!("{DAEMON_URL}/api/v1/agents"))
         .await
         .context("Failed to fetch agents")?;
 
@@ -153,25 +153,25 @@ async fn list() -> Result<()> {
         if agents.is_empty() {
             println!("No agents running");
         } else {
-            println!("{:<36} {:<12} {:<10} {}", "ID", "ROLE", "STATE", "CURRENT TASK");
+            println!("{:<36} {:<12} {:<10} CURRENT TASK", "ID", "ROLE", "STATE");
             println!("{}", "-".repeat(80));
             for agent in agents {
-                let task = agent["current_task"]
-                    .as_str()
-                    .map(|s| {
+                let task = agent["current_task"].as_str().map_or_else(
+                    || "-".to_string(),
+                    |s| {
                         if s.len() > 20 {
                             format!("{}...", &s[..17])
                         } else {
                             s.to_string()
                         }
-                    })
-                    .unwrap_or_else(|| "-".to_string());
+                    },
+                );
 
                 println!(
                     "{:<36} {:<12} {:<10} {}",
-                    agent["id"].as_str().unwrap_or("-"),
+                    agent["agent_id"].as_str().unwrap_or("-"),
                     agent["role"].as_str().unwrap_or("-"),
-                    agent["state"].as_str().unwrap_or("-"),
+                    agent["status"].as_str().unwrap_or("-"),
                     task
                 );
             }
@@ -184,11 +184,11 @@ async fn list() -> Result<()> {
 async fn attach(id: &str) -> Result<()> {
     check_daemon().await?;
 
-    println!("Attaching to agent {}...", id);
+    println!("Attaching to agent {id}...");
     println!("(Press Ctrl+D to detach)\n");
 
     // First verify the agent exists
-    let resp = reqwest::get(format!("{}/api/v1/agents", DAEMON_URL))
+    let resp = reqwest::get(format!("{DAEMON_URL}/api/v1/agents"))
         .await?;
 
     let data: serde_json::Value = resp.json().await?;
@@ -197,19 +197,16 @@ async fn attach(id: &str) -> Result<()> {
     let agent = agents
         .and_then(|arr| {
             arr.iter().find(|a| {
-                a["id"].as_str() == Some(id) || a["role"].as_str().map(|r| r.to_lowercase()) == Some(id.to_lowercase())
+                a["agent_id"].as_str() == Some(id) || a["role"].as_str().map(str::to_lowercase) == Some(id.to_lowercase())
             })
         });
 
-    let agent_id = match agent {
-        Some(a) => a["id"].as_str().unwrap_or(id).to_string(),
-        None => {
-            println!("Agent '{}' not found", id);
-            return Ok(());
-        }
+    let agent_id = if let Some(a) = agent { a["agent_id"].as_str().unwrap_or(id).to_string() } else {
+        println!("Agent '{id}' not found");
+        return Ok(());
     };
 
-    println!("Connected to agent: {}", agent_id);
+    println!("Connected to agent: {agent_id}");
     println!("Type messages and press Enter to send.\n");
 
     // Simple interactive loop
@@ -240,7 +237,7 @@ async fn attach(id: &str) -> Result<()> {
                 });
 
                 match client
-                    .post(format!("{}/api/v1/agents/{}/send", DAEMON_URL, agent_id))
+                    .post(format!("{DAEMON_URL}/api/v1/agents/{agent_id}/send"))
                     .json(&body)
                     .send()
                     .await
@@ -248,20 +245,20 @@ async fn attach(id: &str) -> Result<()> {
                     Ok(resp) if resp.status().is_success() => {
                         let data: serde_json::Value = resp.json().await?;
                         if let Some(output) = data["output"].as_str() {
-                            println!("{}", output);
+                            println!("{output}");
                         }
                     }
                     Ok(resp) => {
                         let body = resp.text().await.unwrap_or_default();
-                        println!("Error: {}", body);
+                        println!("Error: {body}");
                     }
                     Err(e) => {
-                        println!("Failed to send: {}", e);
+                        println!("Failed to send: {e}");
                     }
                 }
             }
             Err(e) => {
-                println!("Error reading input: {}", e);
+                println!("Error reading input: {e}");
                 break;
             }
         }
@@ -275,14 +272,14 @@ async fn send(id: &str, message: &str) -> Result<()> {
 
     let client = Client::new();
 
-    println!("Sending message to agent {}...", id);
+    println!("Sending message to agent {id}...");
 
     let body = serde_json::json!({
         "message": message
     });
 
     let resp = client
-        .post(format!("{}/api/v1/agents/{}/send", DAEMON_URL, id))
+        .post(format!("{DAEMON_URL}/api/v1/agents/{id}/send"))
         .json(&body)
         .send()
         .await
@@ -292,14 +289,14 @@ async fn send(id: &str, message: &str) -> Result<()> {
         let data: serde_json::Value = resp.json().await?;
         println!("\nResponse:");
         if let Some(output) = data["output"].as_str() {
-            println!("{}", output);
+            println!("{output}");
         } else {
             println!("{}", serde_json::to_string_pretty(&data)?);
         }
     } else {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        println!("Failed to send message: {} - {}", status, body);
+        println!("Failed to send message: {status} - {body}");
     }
 
     Ok(())
@@ -308,11 +305,10 @@ async fn send(id: &str, message: &str) -> Result<()> {
 async fn logs(id: &str, lines: usize) -> Result<()> {
     check_daemon().await?;
 
-    println!("Viewing logs for agent {} (last {} lines)...\n", id, lines);
+    println!("Viewing logs for agent {id} (last {lines} lines)...\n");
 
     let resp = reqwest::get(format!(
-        "{}/api/v1/agents/{}/logs?lines={}",
-        DAEMON_URL, id, lines
+        "{DAEMON_URL}/api/v1/agents/{id}/logs?lines={lines}"
     ))
     .await;
 
@@ -322,19 +318,19 @@ async fn logs(id: &str, lines: usize) -> Result<()> {
             if let Some(logs) = data["logs"].as_array() {
                 for log in logs {
                     if let Some(line) = log.as_str() {
-                        println!("{}", line);
+                        println!("{line}");
                     }
                 }
             }
         }
         Ok(r) if r.status() == 404 => {
-            println!("Agent '{}' not found or logs not available", id);
+            println!("Agent '{id}' not found or logs not available");
         }
         Ok(r) => {
             println!("Failed to fetch logs: {}", r.status());
         }
         Err(e) => {
-            println!("Error: {}", e);
+            println!("Error: {e}");
         }
     }
 

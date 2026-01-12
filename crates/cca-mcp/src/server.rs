@@ -6,7 +6,7 @@ use anyhow::Result;
 use tracing::{debug, error, info};
 
 use crate::tools::ToolRegistry;
-use crate::types::*;
+use crate::types::{JsonRpcRequest, JsonRpcResponse};
 
 /// MCP Server for CCA
 pub struct McpServer {
@@ -44,7 +44,7 @@ impl McpServer {
                     let response = self.handle_request(request).await;
                     let response_json = serde_json::to_string(&response)?;
                     debug!("Sending: {}", response_json);
-                    writeln!(stdout, "{}", response_json)?;
+                    writeln!(stdout, "{response_json}")?;
                     stdout.flush()?;
                 }
                 Err(e) => {
@@ -52,7 +52,7 @@ impl McpServer {
                     let error_response =
                         JsonRpcResponse::error(serde_json::Value::Null, -32700, "Parse error");
                     let response_json = serde_json::to_string(&error_response)?;
-                    writeln!(stdout, "{}", response_json)?;
+                    writeln!(stdout, "{response_json}")?;
                     stdout.flush()?;
                 }
             }
@@ -83,8 +83,9 @@ impl McpServer {
             serde_json::json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
-                    "tools": {},
-                    "resources": {}
+                    "tools": {
+                        "listChanged": true
+                    }
                 },
                 "serverInfo": {
                     "name": "cca",

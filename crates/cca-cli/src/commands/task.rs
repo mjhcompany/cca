@@ -42,9 +42,9 @@ pub async fn run(cmd: TaskCommands) -> Result<()> {
 }
 
 async fn create(description: &str, agent: Option<String>) -> Result<()> {
-    println!("Creating task: {}", description);
+    println!("Creating task: {description}");
     if let Some(a) = agent {
-        println!("Target agent: {}", a);
+        println!("Target agent: {a}");
     } else {
         println!("Coordinator will route this task");
     }
@@ -54,14 +54,14 @@ async fn create(description: &str, agent: Option<String>) -> Result<()> {
 }
 
 async fn status(id: &str) -> Result<()> {
-    println!("Task: {}", id);
+    println!("Task: {id}");
     println!("Status: pending");
     // TODO: Call daemon API
     Ok(())
 }
 
 async fn list(limit: usize) -> Result<()> {
-    println!("Recent tasks (last {}):\n", limit);
+    println!("Recent tasks (last {limit}):\n");
     println!("{:<36} {:<12} {:<20}", "ID", "STATUS", "DESCRIPTION");
     println!("{}", "-".repeat(70));
     // TODO: Call daemon API and list tasks
@@ -70,7 +70,7 @@ async fn list(limit: usize) -> Result<()> {
 }
 
 async fn cancel(id: &str) -> Result<()> {
-    println!("Cancelling task {}...", id);
+    println!("Cancelling task {id}...");
     // TODO: Call daemon API
     println!("Task cancelled");
     Ok(())

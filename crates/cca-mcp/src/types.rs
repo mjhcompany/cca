@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// MCP Tool definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpTool {
     pub name: String,
     pub description: String,

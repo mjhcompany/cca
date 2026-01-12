@@ -26,4 +26,5 @@ reqwest.workspace = true
 clap.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+wiremock = "0.6"

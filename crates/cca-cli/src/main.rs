@@ -3,6 +3,17 @@
 //! Primary usage is through the Command Center (Claude Code with CCA plugin).
 //! This CLI is for debugging and testing purposes.
 
+// Clippy pedantic allows - these are intentional design choices
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::return_self_not_must_use)]
+#![allow(clippy::unused_async)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::format_collect)]
+#![allow(clippy::no_effect_underscore_binding)]
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -59,7 +70,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| format!("cca_cli={}", log_level).into()),
+                .unwrap_or_else(|_| format!("cca_cli={log_level}").into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();

@@ -30,6 +30,7 @@ chrono.workspace = true
 portable-pty.workspace = true
 deadpool-redis.workspace = true
 redis.workspace = true
+futures-util.workspace = true
 sqlx.workspace = true
 axum.workspace = true
 tower.workspace = true
@@ -38,4 +39,7 @@ prometheus.workspace = true
 dirs.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+reqwest = { workspace = true }
+tempfile = "3.14"
+axum-test = "16"

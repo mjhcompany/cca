@@ -87,7 +87,21 @@ cca-acp = { path = "crates/cca-acp" }
 cca-mcp = { path = "crates/cca-mcp" }
 cca-rl = { path = "crates/cca-rl" }
 
+# Test dependencies
+[workspace.dependencies.tokio-test]
+version = "0.4"
+
+[workspace.dependencies.tempfile]
+version = "3.14"
+
+[workspace.dependencies.wiremock]
+version = "0.6"
+
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
+
+# Add workspace package for integration tests
+[workspace.metadata.integration-tests]
+enabled = true
