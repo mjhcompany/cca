@@ -80,20 +80,41 @@ CCA enables orchestration of multiple Claude Code instances through a single **C
 
 ## Project Structure
 
+```mermaid
+graph LR
+    subgraph cca[" "]
+        direction TB
+        crates[crates/]
+        agents[agents/]
+        migrations[migrations/]
+        docs[docs/]
+        docker[docker-compose.yml]
+    end
+
+    subgraph crates_sub[" "]
+        core[cca-core - Core types and traits]
+        daemon[cca-daemon - Main daemon]
+        cli[cca-cli - CLI tool]
+        mcp[cca-mcp - MCP server plugin]
+        acp[cca-acp - Agent Communication Protocol]
+        rl[cca-rl - Reinforcement Learning]
+    end
+
+    crates --> crates_sub
 ```
-cca/
-├── crates/
-│   ├── cca-core/       # Core types and traits
-│   ├── cca-daemon/     # Main daemon (ccad)
-│   ├── cca-cli/        # CLI tool (cca)
-│   ├── cca-mcp/        # MCP server plugin
-│   ├── cca-acp/        # Agent Client Protocol
-│   └── cca-rl/         # Reinforcement Learning
-├── agents/             # Agent CLAUDE.md files
-├── migrations/         # Database migrations
-├── docs/               # Documentation
-└── docker-compose.yml  # Infrastructure setup
-```
+
+| Directory | Description |
+|-----------|-------------|
+| `crates/cca-core/` | Core types and traits |
+| `crates/cca-daemon/` | Main daemon (ccad) |
+| `crates/cca-cli/` | CLI tool (cca) |
+| `crates/cca-mcp/` | MCP server plugin |
+| `crates/cca-acp/` | Agent Communication Protocol |
+| `crates/cca-rl/` | Reinforcement Learning |
+| `agents/` | Agent CLAUDE.md files |
+| `migrations/` | Database migrations |
+| `docs/` | Documentation |
+| `docker-compose.yml` | Infrastructure setup |
 
 ## Key Concepts
 

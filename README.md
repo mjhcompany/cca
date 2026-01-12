@@ -25,27 +25,29 @@
 
 CCA enables orchestration of multiple **independent Claude Code instances** through a single **Command Center** architecture. Unlike simulated agents, CCA spawns real Claude Code processes that collaborate on complex tasks.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    COMMAND CENTER (CC)                       │
-│              User's Primary Claude Code Instance             │
-│   ┌────────────────────────────────────────────────────┐    │
-│   │                    CCA Plugin (MCP)                 │    │
-│   └────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    COORDINATOR AGENT                         │
-│              Persistent Claude Code Instance                 │
-└─────────────────────────────────────────────────────────────┘
-                              │
-            ┌─────────────────┼─────────────────┐
-            ▼                 ▼                 ▼
-     ┌───────────┐     ┌───────────┐     ┌───────────┐
-     │ Frontend  │     │  Backend  │     │ Security  │
-     │   Agent   │     │   Agent   │     │   Agent   │
-     └───────────┘     └───────────┘     └───────────┘
+```mermaid
+graph TB
+    subgraph CC["Command Center (CC)"]
+        direction TB
+        User[User's Primary Claude Code Instance]
+        MCP[CCA Plugin - MCP]
+        User --> MCP
+    end
+
+    subgraph Coord["Coordinator Agent"]
+        CoordInstance[Persistent Claude Code Instance]
+    end
+
+    subgraph Specialists["Specialist Agents"]
+        FE[Frontend Agent]
+        BE[Backend Agent]
+        SEC[Security Agent]
+    end
+
+    CC -->|Tasks| Coord
+    Coord -->|Delegate| FE
+    Coord -->|Delegate| BE
+    Coord -->|Delegate| SEC
 ```
 
 ## Features
@@ -151,20 +153,18 @@ Comprehensive documentation is available in the [`docs/`](./docs/) folder:
 
 ### Project Structure
 
-```
-cca/
-├── crates/
-│   ├── cca-core/       # Core types and traits
-│   ├── cca-daemon/     # Main daemon (ccad)
-│   ├── cca-cli/        # CLI tool (cca)
-│   ├── cca-mcp/        # MCP server plugin
-│   ├── cca-acp/        # Agent Communication Protocol
-│   └── cca-rl/         # Reinforcement Learning
-├── agents/             # Agent CLAUDE.md files
-├── migrations/         # Database migrations
-├── docs/               # Documentation
-└── docker-compose.yml  # Infrastructure setup
-```
+| Path | Description |
+|------|-------------|
+| `crates/cca-core/` | Core types and traits |
+| `crates/cca-daemon/` | Main daemon (ccad) |
+| `crates/cca-cli/` | CLI tool (cca) |
+| `crates/cca-mcp/` | MCP server plugin |
+| `crates/cca-acp/` | Agent Communication Protocol |
+| `crates/cca-rl/` | Reinforcement Learning |
+| `agents/` | Agent CLAUDE.md files |
+| `migrations/` | Database migrations |
+| `docs/` | Documentation |
+| `docker-compose.yml` | Infrastructure setup |
 
 ### Agent Roles
 

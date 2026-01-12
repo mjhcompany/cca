@@ -16,7 +16,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use cca_acp::AcpServer;
@@ -224,6 +224,7 @@ fn create_router(state: DaemonState) -> Router {
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/agents", get(list_agents))
         .route("/api/v1/agents", post(spawn_agent))
+        .route("/api/v1/delegate", post(delegate_task))
         .route("/api/v1/tasks", get(list_tasks))
         .route("/api/v1/tasks", post(create_task))
         .route("/api/v1/tasks/{task_id}", get(get_task))
@@ -277,6 +278,36 @@ pub struct TaskResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SpawnAgentRequest {
     pub role: String,
+}
+
+/// Request for delegating a task to a specialist agent
+#[derive(Debug, Clone, Deserialize)]
+pub struct DelegateTaskRequest {
+    /// The role of the agent to delegate to (frontend, backend, dba, devops, security, qa)
+    pub role: String,
+    /// The task description to send to the agent
+    pub task: String,
+    /// Optional context to include
+    #[serde(default)]
+    pub context: Option<String>,
+    /// Timeout in seconds (default: 120)
+    #[serde(default = "default_delegate_timeout")]
+    pub timeout_seconds: u64,
+}
+
+fn default_delegate_timeout() -> u64 {
+    120
+}
+
+/// Response from task delegation
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegateTaskResponse {
+    pub success: bool,
+    pub agent_id: String,
+    pub role: String,
+    pub output: Option<String>,
+    pub error: Option<String>,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -412,6 +443,127 @@ async fn spawn_agent(
         Err(e) => Json(serde_json::json!({
             "error": format!("Failed to spawn agent: {}", e)
         })),
+    }
+}
+
+/// Delegate a task to a specialist agent
+/// This endpoint is used by the coordinator to delegate tasks to sub-agents
+async fn delegate_task(
+    State(state): State<DaemonState>,
+    Json(request): Json<DelegateTaskRequest>,
+) -> Json<DelegateTaskResponse> {
+    let start = std::time::Instant::now();
+
+    // Parse role
+    let role = match request.role.to_lowercase().as_str() {
+        "frontend" => AgentRole::Frontend,
+        "backend" => AgentRole::Backend,
+        "dba" => AgentRole::DBA,
+        "devops" => AgentRole::DevOps,
+        "security" => AgentRole::Security,
+        "qa" => AgentRole::QA,
+        _ => {
+            return Json(DelegateTaskResponse {
+                success: false,
+                agent_id: String::new(),
+                role: request.role.clone(),
+                output: None,
+                error: Some(format!("Unknown agent role: {}. Valid roles: frontend, backend, dba, devops, security, qa", request.role)),
+                duration_ms: start.elapsed().as_millis() as u64,
+            });
+        }
+    };
+
+    info!("Delegating task to {} agent: {}", request.role, request.task);
+
+    // Find existing agent with this role or spawn a new one
+    let agent_id = {
+        let manager = state.agent_manager.read().await;
+        manager
+            .list()
+            .iter()
+            .find(|a| a.role == role)
+            .map(|a| a.id)
+    };
+
+    let agent_id = match agent_id {
+        Some(id) => {
+            debug!("Found existing {} agent: {}", request.role, id);
+            id
+        }
+        None => {
+            // Spawn new agent
+            info!("No {} agent found, spawning new one", request.role);
+            let mut manager = state.agent_manager.write().await;
+            match manager.spawn(role.clone()).await {
+                Ok(id) => {
+                    info!("Spawned new {} agent: {}", request.role, id);
+                    id
+                }
+                Err(e) => {
+                    return Json(DelegateTaskResponse {
+                        success: false,
+                        agent_id: String::new(),
+                        role: request.role.clone(),
+                        output: None,
+                        error: Some(format!("Failed to spawn {} agent: {}", request.role, e)),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                    });
+                }
+            }
+        }
+    };
+
+    // Prepare the full message (task + context if provided)
+    let message = if let Some(ref ctx) = request.context {
+        format!("{}\n\nContext:\n{}", request.task, ctx)
+    } else {
+        request.task.clone()
+    };
+
+    // Send task to agent with custom timeout
+    let timeout = std::time::Duration::from_secs(request.timeout_seconds);
+    let result = {
+        let mut manager = state.agent_manager.write().await;
+
+        // Use tokio timeout
+        tokio::time::timeout(timeout, manager.send(agent_id, &message)).await
+    };
+
+    match result {
+        Ok(Ok(output)) => {
+            info!("Task completed by {} agent in {}ms", request.role, start.elapsed().as_millis());
+            Json(DelegateTaskResponse {
+                success: true,
+                agent_id: agent_id.to_string(),
+                role: request.role.clone(),
+                output: Some(output),
+                error: None,
+                duration_ms: start.elapsed().as_millis() as u64,
+            })
+        }
+        Ok(Err(e)) => {
+            warn!("Task failed for {} agent: {}", request.role, e);
+            Json(DelegateTaskResponse {
+                success: false,
+                agent_id: agent_id.to_string(),
+                role: request.role.clone(),
+                output: None,
+                error: Some(format!("Agent error: {}", e)),
+                duration_ms: start.elapsed().as_millis() as u64,
+            })
+        }
+        Err(_) => {
+            warn!("Task timeout for {} agent after {}s", request.role, request.timeout_seconds);
+            Json(DelegateTaskResponse {
+                success: false,
+                agent_id: agent_id.to_string(),
+                role: request.role.clone(),
+                output: None,
+                error: Some(format!("Timeout after {} seconds", request.timeout_seconds)),
+                duration_ms: start.elapsed().as_millis() as u64,
+            })
+        }
     }
 }
 
