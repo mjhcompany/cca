@@ -348,9 +348,32 @@ async fn logs(id: &str, lines: usize) -> Result<()> {
         Ok(r) if r.status().is_success() => {
             let data: serde_json::Value = r.json().await?;
             if let Some(logs) = data["logs"].as_array() {
-                for log in logs {
-                    if let Some(line) = log.as_str() {
-                        println!("{line}");
+                if logs.is_empty() {
+                    println!("No logs available for agent {short_id}");
+                } else {
+                    for log in logs {
+                        // Parse structured log entries
+                        let timestamp = log["timestamp"].as_str().unwrap_or("-");
+                        let level = log["level"].as_str().unwrap_or("INFO");
+                        let message = log["message"].as_str().unwrap_or("");
+
+                        // Format timestamp (take only time portion for brevity)
+                        let time_part = if timestamp.len() > 19 {
+                            &timestamp[11..19]
+                        } else {
+                            timestamp
+                        };
+
+                        // Color coding for log levels
+                        let level_display = match level {
+                            "ERROR" => format!("\x1b[31m{level}\x1b[0m"),
+                            "WARN" => format!("\x1b[33m{level}\x1b[0m"),
+                            "INFO" => format!("\x1b[32m{level}\x1b[0m"),
+                            "DEBUG" => format!("\x1b[36m{level}\x1b[0m"),
+                            _ => level.to_string(),
+                        };
+
+                        println!("[{time_part}] {level_display:15} {message}");
                     }
                 }
             }

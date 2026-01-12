@@ -1,16 +1,21 @@
-//! Agent Manager - PTY management and process supervision
+//! Agent Manager - Claude Code process management
 //!
-//! Uses portable-pty to spawn Claude Code instances in pseudo-terminals,
-//! enabling proper interactive communication with the agents.
+//! Manages Claude Code agent instances with two modes:
+//! 1. Task mode: Uses -p (print) for reliable non-interactive task execution
+//! 2. Interactive mode: Uses PTY for attach/detach console access
 //!
 //! Note: Some methods are infrastructure for future features and not yet called.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use chrono::Utc;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -18,25 +23,49 @@ use cca_core::{Agent, AgentId, AgentRole, AgentState};
 
 use crate::config::Config;
 
-/// Manages Claude Code agent instances with PTY support
+/// Manages Claude Code agent instances
 pub struct AgentManager {
     agents: HashMap<AgentId, ManagedAgent>,
     config: Config,
 }
 
-/// A managed agent with its PTY handles
+/// Maximum number of log entries to keep per agent
+const MAX_LOG_ENTRIES: usize = 100;
+
+/// A managed agent with optional interactive PTY session
 struct ManagedAgent {
     agent: Agent,
-    pty_handle: Option<PtyHandle>,
+    /// PTY handle for interactive sessions (attach/detach)
+    interactive_session: Option<InteractiveSession>,
+    /// Current task being executed (if any)
+    current_task: Option<String>,
+    /// Recent log entries for this agent
+    logs: Vec<LogEntry>,
 }
 
-/// Handles for PTY communication
-struct PtyHandle {
+/// A log entry for an agent
+#[derive(Clone)]
+pub struct LogEntry {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub level: String,
+    pub message: String,
+}
+
+/// Configuration needed to execute a task for an agent
+#[derive(Clone)]
+pub struct TaskConfig {
+    pub role: AgentRole,
+    pub claude_path: String,
+    pub claude_md_path: String,
+}
+
+/// Handles for interactive PTY communication
+struct InteractiveSession {
     /// Sender to write to PTY stdin
     stdin_tx: mpsc::Sender<String>,
     /// Receiver for PTY stdout output
     stdout_rx: mpsc::Receiver<String>,
-    /// Child process killer
+    /// Child process
     _child: Box<dyn portable_pty::Child + Send + Sync>,
 }
 
@@ -50,6 +79,8 @@ impl AgentManager {
     }
 
     /// Spawn a new agent with the given role
+    /// This registers the agent - actual Claude Code processes are spawned
+    /// per-task in send() or on-demand via start_interactive_session()
     pub async fn spawn(&mut self, role: AgentRole) -> Result<AgentId> {
         if self.agents.len() >= self.config.daemon.max_agents {
             return Err(anyhow!(
@@ -61,10 +92,7 @@ impl AgentManager {
         let mut agent = Agent::new(role.clone());
         let agent_id = agent.id;
 
-        info!("Spawning agent {} with role {:?}", agent_id, role);
-
-        // Spawn Claude Code in a PTY
-        let pty_handle = self.spawn_claude_pty(&agent).await?;
+        info!("Registering agent {} with role {:?}", agent_id, role);
 
         agent.state = AgentState::Ready;
 
@@ -72,20 +100,37 @@ impl AgentManager {
             agent_id,
             ManagedAgent {
                 agent,
-                pty_handle: Some(pty_handle),
+                interactive_session: None,
+                current_task: None,
+                logs: Vec::new(),
             },
         );
 
-        info!("Agent {} spawned successfully", agent_id);
+        info!("Agent {} registered successfully", agent_id);
         Ok(agent_id)
     }
 
-    /// Spawn Claude Code in a PTY
-    async fn spawn_claude_pty(&self, agent: &Agent) -> Result<PtyHandle> {
+    /// Start an interactive PTY session for an agent (for attach functionality)
+    pub async fn start_interactive_session(&mut self, agent_id: AgentId) -> Result<()> {
+        let managed = self
+            .agents
+            .get_mut(&agent_id)
+            .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
+
+        if managed.interactive_session.is_some() {
+            return Ok(()); // Already has an interactive session
+        }
+
+        let role = &managed.agent.role;
+        let claude_path = &self.config.agents.claude_path;
+        let claude_md_path = format!("agents/{}.md", role);
+
+        info!("Starting interactive session for agent {}", agent_id);
+
         // Create PTY system
         let pty_system = NativePtySystem::default();
 
-        // Create PTY pair with reasonable terminal size
+        // Create PTY pair
         let pair = pty_system
             .openpty(PtySize {
                 rows: 24,
@@ -95,27 +140,18 @@ impl AgentManager {
             })
             .context("Failed to create PTY pair")?;
 
-        // Build command for Claude Code
-        let claude_md_path = format!("agents/{}.md", agent.role);
-        let claude_path = &self.config.agents.claude_path;
-
-        info!("Using Claude Code binary: {}", claude_path);
+        // Build command for Claude Code (interactive mode)
         let mut cmd = CommandBuilder::new(claude_path);
 
-        // SECURITY WARNING: This flag bypasses Claude Code permission prompts.
-        // Only use in sandboxed/trusted environments. See SECURITY_REVIEW.md.
         warn!(
-            "Agent {} spawning with --dangerously-skip-permissions. \
+            "Agent {} interactive session with --dangerously-skip-permissions. \
              Ensure environment is properly sandboxed.",
-            agent.id
+            agent_id
         );
         cmd.arg("--dangerously-skip-permissions");
         cmd.env("CLAUDE_MD", &claude_md_path);
-        // Ensure non-interactive mode indicators
         cmd.env("TERM", "dumb");
         cmd.env("NO_COLOR", "1");
-
-        debug!("Spawning Claude Code with CLAUDE_MD={}", claude_md_path);
 
         // Spawn the child process
         let child = pair
@@ -138,7 +174,6 @@ impl AgentManager {
         let (stdout_tx, stdout_rx) = mpsc::channel::<String>(32);
 
         // Spawn blocking task to write to PTY stdin
-        // Uses tokio's blocking thread pool for better integration with async runtime
         tokio::task::spawn_blocking(move || {
             while let Some(msg) = stdin_rx.blocking_recv() {
                 if let Err(e) = writeln!(writer, "{msg}") {
@@ -154,7 +189,6 @@ impl AgentManager {
         });
 
         // Spawn blocking task to read from PTY stdout
-        // Uses tokio's blocking thread pool for better integration with async runtime
         tokio::task::spawn_blocking(move || {
             let buf_reader = BufReader::new(reader);
             for line in buf_reader.lines() {
@@ -173,11 +207,84 @@ impl AgentManager {
             }
         });
 
-        Ok(PtyHandle {
+        managed.interactive_session = Some(InteractiveSession {
             stdin_tx,
             stdout_rx,
             _child: child,
-        })
+        });
+
+        info!("Interactive session started for agent {}", agent_id);
+        Ok(())
+    }
+
+    /// Send a message to an interactive session and wait for response
+    pub async fn send_interactive(
+        &mut self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> Result<String> {
+        let managed = self
+            .agents
+            .get_mut(&agent_id)
+            .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
+
+        let session = managed
+            .interactive_session
+            .as_mut()
+            .ok_or_else(|| anyhow!("No interactive session for agent {agent_id}"))?;
+
+        // Send message to PTY
+        session
+            .stdin_tx
+            .send(message.to_string())
+            .await
+            .map_err(|_| anyhow!("Failed to send message to agent"))?;
+
+        // Read response (with timeout)
+        let response = tokio::time::timeout(
+            Duration::from_secs(30),
+            Self::read_until_complete(&mut session.stdout_rx),
+        )
+        .await
+        .map_err(|_| anyhow!("Timeout waiting for agent response"))??;
+
+        Ok(response)
+    }
+
+    /// Read from stdout until we get a complete response
+    async fn read_until_complete(rx: &mut mpsc::Receiver<String>) -> Result<String> {
+        let mut output = Vec::new();
+        let mut empty_count = 0;
+
+        while let Some(line) = rx.recv().await {
+            if line.is_empty() {
+                empty_count += 1;
+                if empty_count >= 2 {
+                    // Two empty lines in a row means end of response
+                    break;
+                }
+            } else {
+                empty_count = 0;
+                output.push(line);
+            }
+        }
+
+        Ok(output.join("\n"))
+    }
+
+    /// Stop an agent's interactive session
+    pub async fn stop_interactive_session(&mut self, agent_id: AgentId) -> Result<()> {
+        let managed = self
+            .agents
+            .get_mut(&agent_id)
+            .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
+
+        if managed.interactive_session.is_some() {
+            managed.interactive_session = None;
+            info!("Interactive session stopped for agent {}", agent_id);
+        }
+
+        Ok(())
     }
 
     /// Stop an agent
@@ -191,8 +298,8 @@ impl AgentManager {
 
         managed.agent.state = AgentState::Stopping;
 
-        // Drop the PTY handle to close connections
-        managed.pty_handle = None;
+        // Drop interactive session if any
+        managed.interactive_session = None;
 
         managed.agent.state = AgentState::Stopped;
         self.agents.remove(&agent_id);
@@ -224,60 +331,209 @@ impl AgentManager {
         self.agents.get(&agent_id).map(|m| &m.agent)
     }
 
-    /// Send a message to an agent and wait for response
-    pub async fn send(&mut self, agent_id: AgentId, message: &str) -> Result<String> {
+    /// Check if agent has an interactive session
+    pub fn has_interactive_session(&self, agent_id: AgentId) -> bool {
+        self.agents
+            .get(&agent_id)
+            .map(|m| m.interactive_session.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Prepare an agent for task execution (call before releasing lock)
+    /// Returns the config needed to execute the task
+    pub fn prepare_task(&mut self, agent_id: AgentId, message: &str) -> Result<TaskConfig> {
         let managed = self
             .agents
             .get_mut(&agent_id)
             .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
 
-        let pty = managed
-            .pty_handle
-            .as_mut()
-            .ok_or_else(|| anyhow!("Agent {agent_id} has no PTY handle"))?;
+        let role = managed.agent.role.clone();
+        let claude_path = self.config.agents.claude_path.clone();
+        let claude_md_path = format!("agents/{}.md", role);
 
-        // Send message to PTY
-        pty.stdin_tx
-            .send(message.to_string())
-            .await
-            .map_err(|_| anyhow!("Failed to send message to agent"))?;
+        // Set current task
+        let task_preview = if message.len() > 100 {
+            format!("{}...", &message[..100])
+        } else {
+            message.to_string()
+        };
+        managed.current_task = Some(task_preview.clone());
 
-        // Read response (with timeout)
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            Self::read_until_complete(&mut pty.stdout_rx),
-        )
-        .await
-        .map_err(|_| anyhow!("Timeout waiting for agent response"))??;
-
-        Ok(response)
-    }
-
-    /// Read from stdout until we get a complete response
-    async fn read_until_complete(rx: &mut mpsc::Receiver<String>) -> Result<String> {
-        let mut output = Vec::new();
-        let mut empty_count = 0;
-
-        while let Some(line) = rx.recv().await {
-            if line.is_empty() {
-                empty_count += 1;
-                if empty_count >= 2 {
-                    // Two empty lines in a row means end of response
-                    break;
-                }
-            } else {
-                empty_count = 0;
-                output.push(line);
-            }
+        // Add log entry for task start
+        let entry = LogEntry {
+            timestamp: Utc::now(),
+            level: "INFO".to_string(),
+            message: format!("Starting task: {}", task_preview),
+        };
+        managed.logs.push(entry);
+        if managed.logs.len() > MAX_LOG_ENTRIES {
+            managed.logs.remove(0);
         }
 
-        Ok(output.join("\n"))
+        Ok(TaskConfig {
+            role,
+            claude_path,
+            claude_md_path,
+        })
+    }
+
+    /// Record task completion (call after task finishes, re-acquire lock first)
+    pub fn record_task_result(&mut self, agent_id: AgentId, success: bool, output: &str, error: Option<&str>) {
+        if let Some(managed) = self.agents.get_mut(&agent_id) {
+            managed.current_task = None;
+
+            let entry = if success {
+                LogEntry {
+                    timestamp: Utc::now(),
+                    level: "INFO".to_string(),
+                    message: format!("Task completed successfully ({} bytes)", output.len()),
+                }
+            } else {
+                LogEntry {
+                    timestamp: Utc::now(),
+                    level: "ERROR".to_string(),
+                    message: format!("Task failed: {}", error.unwrap_or("unknown error")),
+                }
+            };
+            managed.logs.push(entry);
+            if managed.logs.len() > MAX_LOG_ENTRIES {
+                managed.logs.remove(0);
+            }
+
+            // Add output preview for successful tasks
+            if success {
+                let output_preview = if output.len() > 200 {
+                    format!("{}...", &output[..200])
+                } else {
+                    output.to_string()
+                };
+                let debug_entry = LogEntry {
+                    timestamp: Utc::now(),
+                    level: "DEBUG".to_string(),
+                    message: format!("Output: {}", output_preview.replace('\n', "\\n")),
+                };
+                managed.logs.push(debug_entry);
+                if managed.logs.len() > MAX_LOG_ENTRIES {
+                    managed.logs.remove(0);
+                }
+            }
+        }
+    }
+
+    /// Send a task to an agent using print mode (-p) for reliable execution
+    /// This spawns a new Claude Code process for each task
+    /// WARNING: This method holds the lock during execution - use prepare_task/record_task_result
+    /// for concurrent execution.
+    pub async fn send(&mut self, agent_id: AgentId, message: &str) -> Result<String> {
+        // Get agent info and update current task
+        let config = self.prepare_task(agent_id, message)?;
+
+        info!(
+            "Sending task to {} agent {}: {}",
+            config.role,
+            agent_id,
+            if message.len() > 100 {
+                &message[..100]
+            } else {
+                message
+            }
+        );
+
+        // SECURITY WARNING: This flag bypasses Claude Code permission prompts.
+        warn!(
+            "Agent {} running with --dangerously-skip-permissions. \
+             Ensure environment is properly sandboxed.",
+            agent_id
+        );
+
+        // Build the Claude Code command in print mode
+        let output = Command::new(&config.claude_path)
+            .arg("--dangerously-skip-permissions")
+            .arg("--print") // Non-interactive mode
+            .arg("--output-format")
+            .arg("text")
+            .arg(message) // The prompt/task
+            .env("CLAUDE_MD", &config.claude_md_path)
+            .env("NO_COLOR", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?
+            .wait_with_output()
+            .await?;
+
+        if output.status.success() {
+            let response = String::from_utf8_lossy(&output.stdout).to_string();
+            debug!("Agent {} response length: {} bytes", agent_id, response.len());
+            self.record_task_result(agent_id, true, &response, None);
+            Ok(response)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            self.record_task_result(agent_id, false, "", Some(&stderr));
+            Err(anyhow!("Claude Code failed: {}", stderr))
+        }
+    }
+
+    /// Add a log entry for an agent (public for external use)
+    pub fn add_log(&mut self, agent_id: AgentId, level: &str, message: &str) {
+        if let Some(managed) = self.agents.get_mut(&agent_id) {
+            let entry = LogEntry {
+                timestamp: Utc::now(),
+                level: level.to_string(),
+                message: message.to_string(),
+            };
+            managed.logs.push(entry);
+
+            // Keep only the last MAX_LOG_ENTRIES
+            if managed.logs.len() > MAX_LOG_ENTRIES {
+                managed.logs.remove(0);
+            }
+        }
+    }
+
+    /// Get current task for an agent
+    pub fn get_current_task(&self, agent_id: AgentId) -> Option<String> {
+        self.agents.get(&agent_id).and_then(|m| m.current_task.clone())
+    }
+
+    /// Clear current task for an agent (used when task times out or is cancelled)
+    pub fn clear_current_task(&mut self, agent_id: AgentId) {
+        if let Some(managed) = self.agents.get_mut(&agent_id) {
+            managed.current_task = None;
+        }
+    }
+
+    /// Get logs for an agent
+    pub fn get_logs(&self, agent_id: AgentId, limit: usize) -> Vec<LogEntry> {
+        self.agents
+            .get(&agent_id)
+            .map(|m| {
+                let logs = &m.logs;
+                if logs.len() > limit {
+                    logs[logs.len() - limit..].to_vec()
+                } else {
+                    logs.clone()
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    /// Send a task to an agent with custom timeout
+    pub async fn send_with_timeout(
+        &mut self,
+        agent_id: AgentId,
+        message: &str,
+        timeout: Duration,
+    ) -> Result<String> {
+        tokio::time::timeout(timeout, self.send(agent_id, message))
+            .await
+            .map_err(|_| anyhow!("Timeout waiting for agent response"))?
     }
 
     /// Broadcast a message to all agents
     pub async fn broadcast(&self, message: &str) -> Result<()> {
         info!("Broadcasting message to all agents: {}", message);
-        // TODO: Implement actual broadcast via Redis pub/sub
+        // Broadcast would need to send to all agents with interactive sessions
+        // For now, this is a placeholder
         Ok(())
     }
 }

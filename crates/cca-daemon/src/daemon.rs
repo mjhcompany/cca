@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::{
     routing::{get, post},
     Json, Router,
@@ -16,7 +16,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use cca_acp::AcpServer;
@@ -224,10 +224,13 @@ fn create_router(state: DaemonState) -> Router {
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/agents", get(list_agents))
         .route("/api/v1/agents", post(spawn_agent))
+        .route("/api/v1/agents/:agent_id/send", post(send_to_agent))
+        .route("/api/v1/agents/:agent_id/attach", post(start_agent_session))
+        .route("/api/v1/agents/:agent_id/logs", get(get_agent_logs))
         .route("/api/v1/delegate", post(delegate_task))
         .route("/api/v1/tasks", get(list_tasks))
         .route("/api/v1/tasks", post(create_task))
-        .route("/api/v1/tasks/{task_id}", get(get_task))
+        .route("/api/v1/tasks/:task_id", get(get_task))
         .route("/api/v1/activity", get(get_activity))
         .route("/api/v1/redis/status", get(redis_status))
         .route("/api/v1/postgres/status", get(postgres_status))
@@ -310,6 +313,23 @@ pub struct DelegateTaskResponse {
     pub duration_ms: u64,
 }
 
+/// Request for sending a message to an agent (task mode)
+#[derive(Debug, Clone, Deserialize)]
+pub struct SendToAgentRequest {
+    pub message: String,
+    #[serde(default = "default_delegate_timeout")]
+    pub timeout_seconds: u64,
+}
+
+/// Response from sending a message to an agent
+#[derive(Debug, Clone, Serialize)]
+pub struct SendToAgentResponse {
+    pub success: bool,
+    pub output: Option<String>,
+    pub error: Option<String>,
+    pub duration_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentInfo {
     pub agent_id: String,
@@ -382,7 +402,7 @@ async fn list_agents(State(state): State<DaemonState>) -> Json<serde_json::Value
             agent_id: a.id.to_string(),
             role: a.role.to_string(),
             status: format!("{:?}", a.state),
-            current_task: None,
+            current_task: manager.get_current_task(a.id),
         })
         .collect();
 
@@ -444,6 +464,243 @@ async fn spawn_agent(
             "error": format!("Failed to spawn agent: {}", e)
         })),
     }
+}
+
+/// Send a message to an agent (uses task/print mode for reliable execution)
+/// Uses non-blocking pattern to avoid holding lock during Claude Code execution
+async fn send_to_agent(
+    State(state): State<DaemonState>,
+    Path(agent_id): Path<String>,
+    Json(request): Json<SendToAgentRequest>,
+) -> Json<SendToAgentResponse> {
+    let start = std::time::Instant::now();
+
+    // Validate input size
+    if request.message.len() > MAX_TASK_DESCRIPTION_LEN {
+        return Json(SendToAgentResponse {
+            success: false,
+            output: None,
+            error: Some(format!(
+                "Message too large: {} bytes (max: {} bytes)",
+                request.message.len(),
+                MAX_TASK_DESCRIPTION_LEN
+            )),
+            duration_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+
+    // Parse agent ID
+    let agent_id = match Uuid::parse_str(&agent_id) {
+        Ok(uuid) => AgentId(uuid),
+        Err(_) => {
+            return Json(SendToAgentResponse {
+                success: false,
+                output: None,
+                error: Some(format!("Invalid agent ID: {}", agent_id)),
+                duration_ms: start.elapsed().as_millis() as u64,
+            });
+        }
+    };
+
+    // Step 1: Briefly acquire lock to prepare task (get config, set current task)
+    let config = {
+        let mut manager = state.agent_manager.write().await;
+        match manager.prepare_task(agent_id, &request.message) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                return Json(SendToAgentResponse {
+                    success: false,
+                    output: None,
+                    error: Some(e.to_string()),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                });
+            }
+        }
+    }; // Lock released here
+
+    info!(
+        "Sending task to {} agent {}: {}",
+        config.role,
+        agent_id,
+        if request.message.len() > 100 {
+            &request.message[..100]
+        } else {
+            &request.message
+        }
+    );
+
+    warn!(
+        "Agent {} running with --dangerously-skip-permissions. \
+         Ensure environment is properly sandboxed.",
+        agent_id
+    );
+
+    // Step 2: Execute Claude Code WITHOUT holding the lock
+    let timeout = std::time::Duration::from_secs(request.timeout_seconds);
+    let result = tokio::time::timeout(timeout, async {
+        tokio::process::Command::new(&config.claude_path)
+            .arg("--dangerously-skip-permissions")
+            .arg("--print")
+            .arg("--output-format")
+            .arg("text")
+            .arg(&request.message)
+            .env("CLAUDE_MD", &config.claude_md_path)
+            .env("NO_COLOR", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?
+            .wait_with_output()
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await;
+
+    // Step 3: Briefly acquire lock to record result
+    match result {
+        Ok(Ok(output)) if output.status.success() => {
+            let response = String::from_utf8_lossy(&output.stdout).to_string();
+            {
+                let mut manager = state.agent_manager.write().await;
+                manager.record_task_result(agent_id, true, &response, None);
+            }
+            info!("Message sent to agent {} successfully", agent_id);
+            Json(SendToAgentResponse {
+                success: true,
+                output: Some(response),
+                error: None,
+                duration_ms: start.elapsed().as_millis() as u64,
+            })
+        }
+        Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            {
+                let mut manager = state.agent_manager.write().await;
+                manager.record_task_result(agent_id, false, "", Some(&stderr));
+            }
+            error!("Failed to send message to agent {}: {}", agent_id, stderr);
+            Json(SendToAgentResponse {
+                success: false,
+                output: None,
+                error: Some(format!("Claude Code failed: {}", stderr)),
+                duration_ms: start.elapsed().as_millis() as u64,
+            })
+        }
+        Ok(Err(e)) => {
+            {
+                let mut manager = state.agent_manager.write().await;
+                manager.record_task_result(agent_id, false, "", Some(&e));
+            }
+            error!("Failed to send message to agent {}: {}", agent_id, e);
+            Json(SendToAgentResponse {
+                success: false,
+                output: None,
+                error: Some(e),
+                duration_ms: start.elapsed().as_millis() as u64,
+            })
+        }
+        Err(_) => {
+            error!("Timeout sending message to agent {}", agent_id);
+            {
+                let mut manager = state.agent_manager.write().await;
+                manager.add_log(agent_id, "ERROR", &format!("Task timed out after {} seconds", request.timeout_seconds));
+                manager.clear_current_task(agent_id);
+            }
+            Json(SendToAgentResponse {
+                success: false,
+                output: None,
+                error: Some(format!(
+                    "Timeout after {} seconds",
+                    request.timeout_seconds
+                )),
+                duration_ms: start.elapsed().as_millis() as u64,
+            })
+        }
+    }
+}
+
+/// Start an interactive PTY session for an agent (for attach functionality)
+async fn start_agent_session(
+    State(state): State<DaemonState>,
+    Path(agent_id): Path<String>,
+) -> Json<serde_json::Value> {
+    // Parse agent ID
+    let agent_id = match Uuid::parse_str(&agent_id) {
+        Ok(uuid) => AgentId(uuid),
+        Err(_) => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid agent ID: {}", agent_id)
+            }));
+        }
+    };
+
+    // Start interactive session
+    let mut manager = state.agent_manager.write().await;
+    match manager.start_interactive_session(agent_id).await {
+        Ok(()) => {
+            info!("Started interactive session for agent {}", agent_id);
+            Json(serde_json::json!({
+                "success": true,
+                "agent_id": agent_id.to_string(),
+                "message": "Interactive session started"
+            }))
+        }
+        Err(e) => {
+            error!("Failed to start interactive session for agent {}: {}", agent_id, e);
+            Json(serde_json::json!({
+                "success": false,
+                "error": e.to_string()
+            }))
+        }
+    }
+}
+
+/// Query parameters for logs endpoint
+#[derive(Debug, Deserialize)]
+pub struct LogsQuery {
+    #[serde(default = "default_log_lines")]
+    lines: usize,
+}
+
+fn default_log_lines() -> usize {
+    50
+}
+
+/// Get logs for a specific agent
+async fn get_agent_logs(
+    State(state): State<DaemonState>,
+    Path(agent_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<LogsQuery>,
+) -> Json<serde_json::Value> {
+    // Parse agent ID
+    let agent_id = match Uuid::parse_str(&agent_id) {
+        Ok(uuid) => AgentId(uuid),
+        Err(_) => {
+            return Json(serde_json::json!({
+                "error": format!("Invalid agent ID: {}", agent_id)
+            }));
+        }
+    };
+
+    let manager = state.agent_manager.read().await;
+    let logs = manager.get_logs(agent_id, query.lines);
+
+    let log_entries: Vec<serde_json::Value> = logs
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "timestamp": entry.timestamp.to_rfc3339(),
+                "level": entry.level,
+                "message": entry.message
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "agent_id": agent_id.to_string(),
+        "logs": log_entries
+    }))
 }
 
 /// Delegate a task to a specialist agent
@@ -521,28 +778,97 @@ async fn delegate_task(
         request.task.clone()
     };
 
-    // Send task to agent with custom timeout
-    let timeout = std::time::Duration::from_secs(request.timeout_seconds);
-    let result = {
+    // Step 1: Briefly acquire lock to prepare task
+    let config = {
         let mut manager = state.agent_manager.write().await;
+        match manager.prepare_task(agent_id, &message) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                return Json(DelegateTaskResponse {
+                    success: false,
+                    agent_id: agent_id.to_string(),
+                    role: request.role.clone(),
+                    output: None,
+                    error: Some(e.to_string()),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                });
+            }
+        }
+    }; // Lock released here
 
-        // Use tokio timeout
-        tokio::time::timeout(timeout, manager.send(agent_id, &message)).await
-    };
+    info!(
+        "Sending task to {} agent {}: {}",
+        config.role,
+        agent_id,
+        if message.len() > 100 { &message[..100] } else { &message }
+    );
 
+    warn!(
+        "Agent {} running with --dangerously-skip-permissions. \
+         Ensure environment is properly sandboxed.",
+        agent_id
+    );
+
+    // Step 2: Execute Claude Code WITHOUT holding the lock
+    let timeout = std::time::Duration::from_secs(request.timeout_seconds);
+    let result = tokio::time::timeout(timeout, async {
+        tokio::process::Command::new(&config.claude_path)
+            .arg("--dangerously-skip-permissions")
+            .arg("--print")
+            .arg("--output-format")
+            .arg("text")
+            .arg(&message)
+            .env("CLAUDE_MD", &config.claude_md_path)
+            .env("NO_COLOR", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?
+            .wait_with_output()
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await;
+
+    // Step 3: Briefly acquire lock to record result
     match result {
-        Ok(Ok(output)) => {
+        Ok(Ok(output)) if output.status.success() => {
+            let response = String::from_utf8_lossy(&output.stdout).to_string();
+            {
+                let mut manager = state.agent_manager.write().await;
+                manager.record_task_result(agent_id, true, &response, None);
+            }
             info!("Task completed by {} agent in {}ms", request.role, start.elapsed().as_millis());
             Json(DelegateTaskResponse {
                 success: true,
                 agent_id: agent_id.to_string(),
                 role: request.role.clone(),
-                output: Some(output),
+                output: Some(response),
                 error: None,
                 duration_ms: start.elapsed().as_millis() as u64,
             })
         }
+        Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            {
+                let mut manager = state.agent_manager.write().await;
+                manager.record_task_result(agent_id, false, "", Some(&stderr));
+            }
+            warn!("Task failed for {} agent: {}", request.role, stderr);
+            Json(DelegateTaskResponse {
+                success: false,
+                agent_id: agent_id.to_string(),
+                role: request.role.clone(),
+                output: None,
+                error: Some(format!("Agent error: {}", stderr)),
+                duration_ms: start.elapsed().as_millis() as u64,
+            })
+        }
         Ok(Err(e)) => {
+            {
+                let mut manager = state.agent_manager.write().await;
+                manager.record_task_result(agent_id, false, "", Some(&e));
+            }
             warn!("Task failed for {} agent: {}", request.role, e);
             Json(DelegateTaskResponse {
                 success: false,
@@ -555,6 +881,11 @@ async fn delegate_task(
         }
         Err(_) => {
             warn!("Task timeout for {} agent after {}s", request.role, request.timeout_seconds);
+            {
+                let mut manager = state.agent_manager.write().await;
+                manager.add_log(agent_id, "ERROR", &format!("Task timed out after {} seconds", request.timeout_seconds));
+                manager.clear_current_task(agent_id);
+            }
             Json(DelegateTaskResponse {
                 success: false,
                 agent_id: agent_id.to_string(),
