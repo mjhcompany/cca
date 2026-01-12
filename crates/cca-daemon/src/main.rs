@@ -44,19 +44,52 @@ use crate::daemon::CCADaemon;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "cca_daemon=info,tower_http=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // Load configuration first to get log settings
+    let config = Config::load()?;
+
+    // Initialize tracing with optional file logging
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| format!("ccad={},tower_http=debug", config.daemon.log_level).into());
+
+    let registry = tracing_subscriber::registry().with(env_filter);
+
+    if !config.daemon.log_file.is_empty() {
+        // File logging enabled
+        let log_path = std::path::Path::new(&config.daemon.log_file);
+        let log_dir = log_path.parent().unwrap_or(std::path::Path::new("."));
+        let log_filename = log_path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("ccad.log");
+
+        // Create log directory if it doesn't exist
+        if !log_dir.exists() {
+            std::fs::create_dir_all(log_dir)?;
+        }
+
+        let file_appender = tracing_appender::rolling::never(log_dir, log_filename);
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+        // Log to both file and stdout
+        registry
+            .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+            .init();
+
+        // Keep guard alive for entire program - leak it intentionally
+        // This is safe because the program runs until shutdown
+        Box::leak(Box::new(_guard));
+    } else {
+        // Stdout only
+        registry
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
 
     info!("Starting CCA Daemon v{}", env!("CARGO_PKG_VERSION"));
-
-    // Load configuration
-    let config = Config::load()?;
+    if !config.daemon.log_file.is_empty() {
+        info!("Logging to file: {}", config.daemon.log_file);
+    }
+    info!("Data directory: {:?}", config.daemon.get_data_dir());
     info!(
         "Configuration loaded: bind_address={}",
         config.daemon.bind_address

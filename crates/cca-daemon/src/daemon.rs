@@ -262,6 +262,29 @@ const MAX_BROADCAST_MESSAGE_LEN: usize = 10_000;   // 10KB
 const MAX_CONTENT_LEN: usize = 1_000_000;          // 1MB
 const MAX_QUERY_LEN: usize = 1_000;                // 1KB
 
+/// Coordinator system prompt - enforces JSON delegation output
+const COORDINATOR_SYSTEM_PROMPT: &str = r#"You are a COORDINATOR agent. You do NOT execute tasks yourself.
+
+Your ONLY job is to decide which specialist agent should handle a task and output a JSON delegation.
+
+Available specialists: backend, frontend, dba, devops, security, qa
+
+You MUST respond with ONLY a JSON object in this exact format:
+{"action":"delegate","delegations":[{"role":"AGENT_ROLE","task":"Task description for the specialist","context":"Optional context"}],"summary":"Brief summary"}
+
+Example for "Analyze code structure":
+{"action":"delegate","delegations":[{"role":"backend","task":"Analyze the code structure and document components","context":"Code analysis request"}],"summary":"Delegating to backend specialist"}
+
+RULES:
+- Output ONLY valid JSON, nothing else
+- Always delegate - never answer directly
+- Use "backend" for code analysis, API work
+- Use "frontend" for UI/UX work
+- Use "dba" for database work
+- Use "devops" for infrastructure
+- Use "security" for security reviews
+- Use "qa" for testing"#;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateTaskRequest {
     pub description: String,
@@ -311,6 +334,29 @@ pub struct DelegateTaskResponse {
     pub output: Option<String>,
     pub error: Option<String>,
     pub duration_ms: u64,
+}
+
+/// Coordinator response format for delegation decisions
+#[derive(Debug, Clone, Deserialize)]
+pub struct CoordinatorResponse {
+    pub action: String, // "delegate", "direct", or "error"
+    #[serde(default)]
+    pub delegations: Vec<CoordinatorDelegation>,
+    #[serde(default)]
+    pub response: Option<String>, // For direct responses
+    #[serde(default)]
+    pub error: Option<String>, // For error responses
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
+/// A single delegation from coordinator
+#[derive(Debug, Clone, Deserialize)]
+pub struct CoordinatorDelegation {
+    pub role: String,
+    pub task: String,
+    #[serde(default)]
+    pub context: Option<String>,
 }
 
 /// Request for sending a message to an agent (task mode)
@@ -960,92 +1006,353 @@ async fn create_task(
 
     info!("Task created: {} - {}", task_id, request.description);
 
-    // Try to find or spawn a Coordinator to handle the task
-    let coordinator_id = {
-        let manager = state.agent_manager.read().await;
-        manager
-            .list()
-            .iter()
-            .find(|a| matches!(a.role, AgentRole::Coordinator))
-            .map(|a| a.id)
-    };
-
-    let result = if let Some(agent_id) = coordinator_id {
-        // Send task to existing Coordinator
-        let mut manager = state.agent_manager.write().await;
-        match manager.send(agent_id, &request.description).await {
-            Ok(response) => {
-                // Update task with response
-                let mut tasks = state.tasks.write().await;
-                if let Some(task) = tasks.get_mut(&task_id) {
-                    task.status = "completed".to_string();
-                    task.output = Some(response.clone());
-                    task.assigned_agent = Some(agent_id.to_string());
-                    task.updated_at = Utc::now();
-                }
-                // Publish task completed event
-                publish_task_event(
-                    &state.redis,
-                    PubSubMessage::TaskCompleted {
-                        task_id: TaskId::new(), // Event tracking ID
-                        agent_id,
-                        success: true,
-                    },
-                )
-                .await;
-                Ok((response, agent_id.to_string()))
-            }
-            Err(e) => Err(e.to_string()),
-        }
-    } else {
-        // No Coordinator running - try to spawn one
-        let spawn_result = {
-            let mut manager = state.agent_manager.write().await;
-            manager.spawn(AgentRole::Coordinator).await
+    // Step 1: Find or spawn a Coordinator (brief locks only)
+    let (coordinator_id, config) = {
+        // Check for existing coordinator
+        let existing_id = {
+            let manager = state.agent_manager.read().await;
+            manager
+                .list()
+                .iter()
+                .find(|a| matches!(a.role, AgentRole::Coordinator))
+                .map(|a| a.id)
         };
 
-        match spawn_result {
-            Ok(agent_id) => {
-                // Send task to new Coordinator
+        let coordinator_id = match existing_id {
+            Some(id) => id,
+            None => {
+                // Spawn new coordinator
                 let mut manager = state.agent_manager.write().await;
-                match manager.send(agent_id, &request.description).await {
-                    Ok(response) => {
+                match manager.spawn(AgentRole::Coordinator).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        let error_msg = format!("Failed to spawn Coordinator: {e}");
+                        {
+                            let mut tasks = state.tasks.write().await;
+                            if let Some(task) = tasks.get_mut(&task_id) {
+                                task.status = "failed".to_string();
+                                task.error = Some(error_msg.clone());
+                                task.updated_at = Utc::now();
+                            }
+                        }
+                        return Json(TaskResponse {
+                            task_id,
+                            status: "failed".to_string(),
+                            output: None,
+                            error: Some(error_msg),
+                            assigned_agent: None,
+                        });
+                    }
+                }
+            }
+        };
+
+        // Prepare task (brief write lock)
+        let mut config = {
+            let mut manager = state.agent_manager.write().await;
+            match manager.prepare_task(coordinator_id, &request.description) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    {
+                        let mut tasks = state.tasks.write().await;
+                        if let Some(task) = tasks.get_mut(&task_id) {
+                            task.status = "failed".to_string();
+                            task.error = Some(error_msg.clone());
+                            task.updated_at = Utc::now();
+                        }
+                    }
+                    return Json(TaskResponse {
+                        task_id,
+                        status: "failed".to_string(),
+                        output: None,
+                        error: Some(error_msg),
+                        assigned_agent: None,
+                    });
+                }
+            }
+        };
+
+        // Set coordinator system prompt to enforce JSON delegation output
+        config.system_prompt = Some(COORDINATOR_SYSTEM_PROMPT.to_string());
+
+        (coordinator_id, config)
+    }; // All locks released here
+
+    // Update task to running status
+    {
+        let mut tasks = state.tasks.write().await;
+        if let Some(task) = tasks.get_mut(&task_id) {
+            task.status = "running".to_string();
+            task.assigned_agent = Some(coordinator_id.to_string());
+            task.updated_at = Utc::now();
+        }
+    }
+
+    info!(
+        "Sending task to {} agent {}: {}",
+        config.role,
+        coordinator_id,
+        if request.description.len() > 100 { &request.description[..100] } else { &request.description }
+    );
+
+    warn!(
+        "Agent {} running with --dangerously-skip-permissions. \
+         Ensure environment is properly sandboxed.",
+        coordinator_id
+    );
+
+    // Step 2: Execute Claude Code (Coordinator) WITHOUT holding any locks
+    let mut cmd = tokio::process::Command::new(&config.claude_path);
+    cmd.arg("--dangerously-skip-permissions")
+        .arg("--print")
+        .arg("--output-format")
+        .arg("text");
+
+    // Add system prompt if provided (critical for coordinator)
+    if let Some(ref system_prompt) = config.system_prompt {
+        cmd.arg("--system-prompt").arg(system_prompt);
+    }
+
+    cmd.arg(&request.description)
+        .env("CLAUDE_MD", &config.claude_md_path)
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let result = cmd.spawn()
+        .map_err(|e| e.to_string())
+        .and_then(|child| Ok(child));
+
+    let result = match result {
+        Ok(child) => child.wait_with_output().await.map_err(|e| e.to_string()),
+        Err(e) => Err(e),
+    };
+
+    // Step 3: Process coordinator's response
+    match result {
+        Ok(output) if output.status.success() => {
+            let coordinator_output = String::from_utf8_lossy(&output.stdout).to_string();
+
+            // Record coordinator result
+            {
+                let mut manager = state.agent_manager.write().await;
+                manager.record_task_result(coordinator_id, true, &coordinator_output, None);
+            }
+
+            // Try to parse coordinator's JSON response
+            // Extract JSON from output (coordinator might include markdown or other text)
+            let json_str = extract_json_from_output(&coordinator_output);
+
+            match json_str.and_then(|s| serde_json::from_str::<CoordinatorResponse>(&s).ok()) {
+                Some(coord_response) => {
+                    info!("Coordinator decision: action={}, summary={:?}",
+                          coord_response.action, coord_response.summary);
+
+                    match coord_response.action.as_str() {
+                        "delegate" => {
+                            // Execute delegations to specialist agents
+                            let delegation_results = execute_delegations(
+                                &state,
+                                &coord_response.delegations,
+                            ).await;
+
+                            // Aggregate results
+                            let mut combined_output = String::new();
+                            let mut all_success = true;
+                            let mut errors = Vec::new();
+
+                            if let Some(summary) = &coord_response.summary {
+                                combined_output.push_str(&format!("## Coordinator Summary\n{}\n\n", summary));
+                            }
+
+                            for (delegation, result) in coord_response.delegations.iter().zip(delegation_results.iter()) {
+                                combined_output.push_str(&format!("## {} Agent\n", delegation.role));
+                                if result.success {
+                                    if let Some(ref out) = result.output {
+                                        combined_output.push_str(out);
+                                    }
+                                } else {
+                                    all_success = false;
+                                    if let Some(ref err) = result.error {
+                                        errors.push(format!("{}: {}", delegation.role, err));
+                                        combined_output.push_str(&format!("Error: {}\n", err));
+                                    }
+                                }
+                                combined_output.push_str("\n\n");
+                            }
+
+                            // Update task state
+                            {
+                                let mut tasks = state.tasks.write().await;
+                                if let Some(task) = tasks.get_mut(&task_id) {
+                                    task.status = if all_success { "completed" } else { "partial" }.to_string();
+                                    task.output = Some(combined_output.clone());
+                                    if !errors.is_empty() {
+                                        task.error = Some(errors.join("; "));
+                                    }
+                                    task.updated_at = Utc::now();
+                                }
+                            }
+
+                            // Publish event
+                            publish_task_event(
+                                &state.redis,
+                                PubSubMessage::TaskCompleted {
+                                    task_id: TaskId::new(),
+                                    agent_id: coordinator_id,
+                                    success: all_success,
+                                },
+                            )
+                            .await;
+
+                            Json(TaskResponse {
+                                task_id,
+                                status: if all_success { "completed" } else { "partial" }.to_string(),
+                                output: Some(combined_output),
+                                error: if errors.is_empty() { None } else { Some(errors.join("; ")) },
+                                assigned_agent: Some(coordinator_id.to_string()),
+                            })
+                        }
+                        "direct" => {
+                            // Coordinator should NOT handle tasks directly - warn and treat as error
+                            warn!("Coordinator attempted direct response instead of delegating - this violates coordination rules");
+
+                            let error_msg = "Coordinator error: attempted to handle task directly instead of delegating to specialists. Tasks must be delegated.";
+
+                            // Update task state
+                            {
+                                let mut tasks = state.tasks.write().await;
+                                if let Some(task) = tasks.get_mut(&task_id) {
+                                    task.status = "failed".to_string();
+                                    task.error = Some(error_msg.to_string());
+                                    task.updated_at = Utc::now();
+                                }
+                            }
+
+                            Json(TaskResponse {
+                                task_id,
+                                status: "failed".to_string(),
+                                output: None,
+                                error: Some(error_msg.to_string()),
+                                assigned_agent: Some(coordinator_id.to_string()),
+                            })
+                        }
+                        "error" => {
+                            let error_msg = coord_response.error.unwrap_or_else(|| "Unknown coordinator error".to_string());
+
+                            // Update task state
+                            {
+                                let mut tasks = state.tasks.write().await;
+                                if let Some(task) = tasks.get_mut(&task_id) {
+                                    task.status = "failed".to_string();
+                                    task.error = Some(error_msg.clone());
+                                    task.updated_at = Utc::now();
+                                }
+                            }
+
+                            Json(TaskResponse {
+                                task_id,
+                                status: "failed".to_string(),
+                                output: None,
+                                error: Some(error_msg),
+                                assigned_agent: Some(coordinator_id.to_string()),
+                            })
+                        }
+                        _ => {
+                            // Unknown action, treat as direct response
+                            warn!("Unknown coordinator action: {}, treating as direct", coord_response.action);
+
+                            // Update task state
+                            {
+                                let mut tasks = state.tasks.write().await;
+                                if let Some(task) = tasks.get_mut(&task_id) {
+                                    task.status = "completed".to_string();
+                                    task.output = Some(coordinator_output.clone());
+                                    task.updated_at = Utc::now();
+                                }
+                            }
+
+                            Json(TaskResponse {
+                                task_id,
+                                status: "completed".to_string(),
+                                output: Some(coordinator_output),
+                                error: None,
+                                assigned_agent: Some(coordinator_id.to_string()),
+                            })
+                        }
+                    }
+                }
+                None => {
+                    // Coordinator didn't return valid JSON, treat as direct response
+                    debug!("Coordinator output is not structured JSON, using as direct response");
+
+                    // Update task state
+                    {
                         let mut tasks = state.tasks.write().await;
                         if let Some(task) = tasks.get_mut(&task_id) {
                             task.status = "completed".to_string();
-                            task.output = Some(response.clone());
-                            task.assigned_agent = Some(agent_id.to_string());
+                            task.output = Some(coordinator_output.clone());
                             task.updated_at = Utc::now();
                         }
-                        // Publish task completed event
-                        publish_task_event(
-                            &state.redis,
-                            PubSubMessage::TaskCompleted {
-                                task_id: TaskId::new(), // Event tracking ID
-                                agent_id,
-                                success: true,
-                            },
-                        )
-                        .await;
-                        Ok((response, agent_id.to_string()))
                     }
-                    Err(e) => Err(e.to_string()),
+
+                    publish_task_event(
+                        &state.redis,
+                        PubSubMessage::TaskCompleted {
+                            task_id: TaskId::new(),
+                            agent_id: coordinator_id,
+                            success: true,
+                        },
+                    )
+                    .await;
+
+                    Json(TaskResponse {
+                        task_id,
+                        status: "completed".to_string(),
+                        output: Some(coordinator_output),
+                        error: None,
+                        assigned_agent: Some(coordinator_id.to_string()),
+                    })
                 }
             }
-            Err(e) => Err(format!("Failed to spawn Coordinator: {e}")),
         }
-    };
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let error_msg = format!("Claude Code failed: {}", stderr);
 
-    match result {
-        Ok((response, agent_id)) => Json(TaskResponse {
-            task_id,
-            status: "completed".to_string(),
-            output: Some(response),
-            error: None,
-            assigned_agent: Some(agent_id),
-        }),
+            // Record in agent manager
+            {
+                let mut manager = state.agent_manager.write().await;
+                manager.record_task_result(coordinator_id, false, "", Some(&stderr));
+            }
+
+            // Update task state
+            {
+                let mut tasks = state.tasks.write().await;
+                if let Some(task) = tasks.get_mut(&task_id) {
+                    task.status = "failed".to_string();
+                    task.error = Some(error_msg.clone());
+                    task.updated_at = Utc::now();
+                }
+            }
+
+            Json(TaskResponse {
+                task_id,
+                status: "failed".to_string(),
+                output: None,
+                error: Some(error_msg),
+                assigned_agent: Some(coordinator_id.to_string()),
+            })
+        }
         Err(e) => {
-            // Update task with error
+            // Record in agent manager
+            {
+                let mut manager = state.agent_manager.write().await;
+                manager.record_task_result(coordinator_id, false, "", Some(&e));
+            }
+
+            // Update task state
             {
                 let mut tasks = state.tasks.write().await;
                 if let Some(task) = tasks.get_mut(&task_id) {
@@ -1054,6 +1361,7 @@ async fn create_task(
                     task.updated_at = Utc::now();
                 }
             }
+
             Json(TaskResponse {
                 task_id,
                 status: "failed".to_string(),
@@ -1063,6 +1371,261 @@ async fn create_task(
             })
         }
     }
+}
+
+/// Extract JSON object from coordinator output (may contain markdown or other text)
+fn extract_json_from_output(output: &str) -> Option<String> {
+    // Try to find JSON object in the output
+    // Look for { ... } pattern, handling nested braces
+    let trimmed = output.trim();
+
+    // If the output starts with {, try to parse directly
+    if trimmed.starts_with('{') {
+        // Find matching closing brace
+        let mut depth = 0;
+        let mut end_pos = 0;
+        for (i, c) in trimmed.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_pos = i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if end_pos > 0 {
+            return Some(trimmed[..end_pos].to_string());
+        }
+    }
+
+    // Look for ```json code blocks
+    if let Some(start) = trimmed.find("```json") {
+        let json_start = start + 7;
+        if let Some(end) = trimmed[json_start..].find("```") {
+            return Some(trimmed[json_start..json_start + end].trim().to_string());
+        }
+    }
+
+    // Look for ``` code blocks (might not be marked as json)
+    if let Some(start) = trimmed.find("```\n{") {
+        let json_start = start + 4;
+        if let Some(end) = trimmed[json_start..].find("```") {
+            return Some(trimmed[json_start..json_start + end].trim().to_string());
+        }
+    }
+
+    // Look for first { in the output
+    if let Some(start) = trimmed.find('{') {
+        let json_part = &trimmed[start..];
+        let mut depth = 0;
+        let mut end_pos = 0;
+        for (i, c) in json_part.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_pos = i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if end_pos > 0 {
+            return Some(json_part[..end_pos].to_string());
+        }
+    }
+
+    None
+}
+
+/// Execute delegations to specialist agents
+async fn execute_delegations(
+    state: &DaemonState,
+    delegations: &[CoordinatorDelegation],
+) -> Vec<DelegateTaskResponse> {
+    let mut results = Vec::new();
+
+    for delegation in delegations {
+        info!("Executing delegation to {}: {}", delegation.role,
+              if delegation.task.len() > 50 { &delegation.task[..50] } else { &delegation.task });
+
+        // Parse role
+        let role = match delegation.role.to_lowercase().as_str() {
+            "frontend" => AgentRole::Frontend,
+            "backend" => AgentRole::Backend,
+            "dba" => AgentRole::DBA,
+            "devops" => AgentRole::DevOps,
+            "security" => AgentRole::Security,
+            "qa" => AgentRole::QA,
+            _ => {
+                results.push(DelegateTaskResponse {
+                    success: false,
+                    agent_id: String::new(),
+                    role: delegation.role.clone(),
+                    output: None,
+                    error: Some(format!("Unknown role: {}", delegation.role)),
+                    duration_ms: 0,
+                });
+                continue;
+            }
+        };
+
+        let start = std::time::Instant::now();
+
+        // Find or spawn agent
+        let agent_id = {
+            let manager = state.agent_manager.read().await;
+            manager.list().iter().find(|a| a.role == role).map(|a| a.id)
+        };
+
+        let agent_id = match agent_id {
+            Some(id) => id,
+            None => {
+                let mut manager = state.agent_manager.write().await;
+                match manager.spawn(role.clone()).await {
+                    Ok(id) => {
+                        info!("Spawned new {} agent: {}", delegation.role, id);
+                        id
+                    }
+                    Err(e) => {
+                        results.push(DelegateTaskResponse {
+                            success: false,
+                            agent_id: String::new(),
+                            role: delegation.role.clone(),
+                            output: None,
+                            error: Some(format!("Failed to spawn agent: {}", e)),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                        });
+                        continue;
+                    }
+                }
+            }
+        };
+
+        // Prepare message with context
+        let message = if let Some(ref ctx) = delegation.context {
+            format!("{}\n\nContext:\n{}", delegation.task, ctx)
+        } else {
+            delegation.task.clone()
+        };
+
+        // Prepare task
+        let config = {
+            let mut manager = state.agent_manager.write().await;
+            match manager.prepare_task(agent_id, &message) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    results.push(DelegateTaskResponse {
+                        success: false,
+                        agent_id: agent_id.to_string(),
+                        role: delegation.role.clone(),
+                        output: None,
+                        error: Some(e.to_string()),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                    });
+                    continue;
+                }
+            }
+        };
+
+        info!("Sending task to {} agent {}", config.role, agent_id);
+
+        // Execute Claude Code
+        let timeout = std::time::Duration::from_secs(180); // 3 minute timeout for delegated tasks
+        let result = tokio::time::timeout(timeout, async {
+            tokio::process::Command::new(&config.claude_path)
+                .arg("--dangerously-skip-permissions")
+                .arg("--print")
+                .arg("--output-format")
+                .arg("text")
+                .arg(&message)
+                .env("CLAUDE_MD", &config.claude_md_path)
+                .env("NO_COLOR", "1")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| e.to_string())?
+                .wait_with_output()
+                .await
+                .map_err(|e| e.to_string())
+        })
+        .await;
+
+        // Record result
+        match result {
+            Ok(Ok(output)) if output.status.success() => {
+                let response = String::from_utf8_lossy(&output.stdout).to_string();
+                {
+                    let mut manager = state.agent_manager.write().await;
+                    manager.record_task_result(agent_id, true, &response, None);
+                }
+                info!("{} agent completed task in {}ms", delegation.role, start.elapsed().as_millis());
+                results.push(DelegateTaskResponse {
+                    success: true,
+                    agent_id: agent_id.to_string(),
+                    role: delegation.role.clone(),
+                    output: Some(response),
+                    error: None,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                });
+            }
+            Ok(Ok(output)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                {
+                    let mut manager = state.agent_manager.write().await;
+                    manager.record_task_result(agent_id, false, "", Some(&stderr));
+                }
+                warn!("{} agent failed: {}", delegation.role, stderr);
+                results.push(DelegateTaskResponse {
+                    success: false,
+                    agent_id: agent_id.to_string(),
+                    role: delegation.role.clone(),
+                    output: None,
+                    error: Some(stderr),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                });
+            }
+            Ok(Err(e)) => {
+                {
+                    let mut manager = state.agent_manager.write().await;
+                    manager.record_task_result(agent_id, false, "", Some(&e));
+                }
+                warn!("{} agent error: {}", delegation.role, e);
+                results.push(DelegateTaskResponse {
+                    success: false,
+                    agent_id: agent_id.to_string(),
+                    role: delegation.role.clone(),
+                    output: None,
+                    error: Some(e),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                });
+            }
+            Err(_) => {
+                {
+                    let mut manager = state.agent_manager.write().await;
+                    manager.add_log(agent_id, "ERROR", "Task timed out after 180 seconds");
+                    manager.clear_current_task(agent_id);
+                }
+                warn!("{} agent timed out", delegation.role);
+                results.push(DelegateTaskResponse {
+                    success: false,
+                    agent_id: agent_id.to_string(),
+                    role: delegation.role.clone(),
+                    output: None,
+                    error: Some("Timeout after 180 seconds".to_string()),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                });
+            }
+        }
+    }
+
+    results
 }
 
 async fn get_task(

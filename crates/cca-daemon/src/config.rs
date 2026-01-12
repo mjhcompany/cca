@@ -30,6 +30,10 @@ pub struct DaemonConfig {
     pub api_keys: Vec<String>,
     /// Whether authentication is required for API endpoints
     pub require_auth: bool,
+    /// Log file path (empty means stdout only)
+    pub log_file: String,
+    /// Data directory containing agent .md files (defaults to /usr/local/share/cca or ./agents)
+    pub data_dir: String,
 }
 
 /// Deserialize API keys from comma-separated string or array
@@ -64,7 +68,51 @@ impl Default for DaemonConfig {
             max_agents: 10,
             api_keys: Vec::new(),
             require_auth: false, // Disabled by default for development
+            log_file: String::new(), // Empty means stdout only
+            data_dir: String::new(), // Empty means auto-detect
         }
+    }
+}
+
+impl DaemonConfig {
+    /// Get the data directory path, auto-detecting if not explicitly set
+    pub fn get_data_dir(&self) -> PathBuf {
+        if !self.data_dir.is_empty() {
+            return PathBuf::from(&self.data_dir);
+        }
+
+        // Check standard locations in order:
+        // 1. CCA_DATA_DIR environment variable
+        // 2. ./agents (current directory - for development)
+        // 3. /usr/local/share/cca (installed location)
+        // 4. ~/.local/share/cca (user local)
+
+        if let Ok(path) = std::env::var("CCA_DATA_DIR") {
+            let p = PathBuf::from(&path);
+            if p.exists() {
+                return p;
+            }
+        }
+
+        let local = PathBuf::from("agents");
+        if local.exists() {
+            return PathBuf::from("."); // Return parent so agents/{role}.md works
+        }
+
+        let system = PathBuf::from("/usr/local/share/cca");
+        if system.exists() {
+            return system;
+        }
+
+        if let Some(home) = dirs::home_dir() {
+            let user_local = home.join(".local").join("share").join("cca");
+            if user_local.exists() {
+                return user_local;
+            }
+        }
+
+        // Default fallback - current directory
+        PathBuf::from(".")
     }
 }
 

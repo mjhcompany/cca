@@ -24,6 +24,7 @@ thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-appender = "0.2"
 config.workspace = true
 uuid.workspace = true
 chrono.workspace = true

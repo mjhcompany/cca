@@ -57,6 +57,7 @@ pub struct TaskConfig {
     pub role: AgentRole,
     pub claude_path: String,
     pub claude_md_path: String,
+    pub system_prompt: Option<String>,
 }
 
 /// Handles for interactive PTY communication
@@ -123,7 +124,9 @@ impl AgentManager {
 
         let role = &managed.agent.role;
         let claude_path = &self.config.agents.claude_path;
-        let claude_md_path = format!("agents/{}.md", role);
+        let data_dir = self.config.daemon.get_data_dir();
+        let claude_md_path = data_dir.join("agents").join(format!("{}.md", role))
+            .to_string_lossy().to_string();
 
         info!("Starting interactive session for agent {}", agent_id);
 
@@ -349,7 +352,9 @@ impl AgentManager {
 
         let role = managed.agent.role.clone();
         let claude_path = self.config.agents.claude_path.clone();
-        let claude_md_path = format!("agents/{}.md", role);
+        let data_dir = self.config.daemon.get_data_dir();
+        let claude_md_path = data_dir.join("agents").join(format!("{}.md", role))
+            .to_string_lossy().to_string();
 
         // Set current task
         let task_preview = if message.len() > 100 {
@@ -374,6 +379,7 @@ impl AgentManager {
             role,
             claude_path,
             claude_md_path,
+            system_prompt: None,
         })
     }
 
