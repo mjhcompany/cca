@@ -60,17 +60,41 @@ let role = match request.role.to_lowercase().as_str() {
 
 ---
 
-### 1.3 `--dangerously-skip-permissions` Flag
-**Location:** `crates/cca-daemon/src/agent_manager.rs:103`
-**Severity:** 🔴 HIGH
+### 1.3 `--dangerously-skip-permissions` Flag - **FIXED (SEC-007)**
+**Location:** `crates/cca-daemon/src/agent_manager.rs`, `crates/cca-daemon/src/config.rs`
+**Severity:** 🔴 HIGH → ✅ RESOLVED
 
-```rust
-cmd.arg("--dangerously-skip-permissions");
+**Status:** ✅ FIXED - Replaced blanket `--dangerously-skip-permissions` with granular permission allowlist system.
+
+**Implementation:**
+- Added `PermissionsConfig` in `config.rs` with three modes:
+  - `allowlist` (default, secure): Uses `--allowedTools` and `--disallowedTools` for granular control
+  - `sandbox`: Minimal read-only permissions, expects external sandboxing
+  - `dangerous` (legacy): Uses `--dangerously-skip-permissions` (NOT RECOMMENDED)
+- Default allows safe read operations and restricted writes (src/**, tests/**, docs/**)
+- Default denies dangerous operations (rm -rf, sudo, .env files, credentials)
+- Role-specific overrides supported via `role_overrides` configuration
+- Network access disabled by default (blocks curl, wget, nc)
+
+**Why `dangerous` mode is dangerous:**
+- Disables ALL Claude Code permission checks
+- Allows agents to read/write any file (including .env, credentials, secrets)
+- Allows agents to execute any command (including sudo, rm -rf)
+- Creates severe security risks: data exfiltration, system compromise, privilege escalation
+
+**Configuration Example:**
+```toml
+[agents.permissions]
+mode = "allowlist"
+allowed_tools = ["Read", "Glob", "Grep", "Write(src/**)", "Bash(git status)"]
+denied_tools = ["Bash(rm -rf *)", "Bash(sudo *)", "Read(.env*)"]
+allow_network = false
 ```
 
-**Risk:** Spawned Claude Code instances run without permission prompts. This is intentional for automation but bypasses safety checks.
-
-**Recommendation:** Document this clearly and ensure agents only operate in sandboxed environments.
+**Documentation:**
+- See `docs/security-hardening.md` for comprehensive security documentation
+- See `docs/configuration.md` for full configuration reference
+- See `cca.toml.example` for example configuration
 
 ---
 
@@ -274,7 +298,7 @@ $ grep -r "unsafe" crates/
 | Priority | Issue | Recommendation |
 |----------|-------|----------------|
 | 🔴 P0 | No API authentication | Add auth middleware before production |
-| 🔴 P0 | Skip permissions flag | Document and sandbox agent execution |
+| ✅ FIXED | Skip permissions flag | SEC-007: Replaced with granular allowlist system |
 | 🟠 P1 | Hardcoded credentials | Remove defaults, require explicit config |
 | 🟠 P1 | Credential in responses | Remove URL from status endpoints |
 | 🟠 P1 | Blocking in async | Use spawn_blocking or async PTY |

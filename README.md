@@ -288,7 +288,29 @@ Contributions are welcome! Please read our contributing guidelines before submit
 
 ## Security
 
-> **Warning**: The daemon spawns agents with `--dangerously-skip-permissions` which bypasses Claude Code's permission prompts. Only run in trusted/sandboxed environments.
+CCA uses granular permission control for Claude Code invocations:
+
+**Permission Modes:**
+- `allowlist` (default): Uses `--allowedTools` and `--disallowedTools` for granular control
+- `sandbox`: Minimal read-only permissions, expects external sandboxing (container/VM)
+- `dangerous`: Legacy mode using `--dangerously-skip-permissions` (NOT recommended)
+
+**Configuration:**
+```toml
+# cca.toml
+[agents.permissions]
+mode = "allowlist"
+allowed_tools = ["Read", "Glob", "Grep", "Write(src/**)", "Bash(git *)"]
+denied_tools = ["Bash(rm -rf *)", "Bash(sudo *)", "Read(.env*)"]
+allow_network = false
+```
+
+**Environment Variables (CLI workers):**
+```bash
+export CCA_PERMISSION_MODE=allowlist  # or "sandbox" or "dangerous"
+export CCA_ALLOWED_TOOLS="Read,Glob,Grep,Write(src/**)"
+export CCA_DENIED_TOOLS="Bash(rm *),Bash(sudo *)"
+```
 
 See [SECURITY_REVIEW.md](./SECURITY_REVIEW.md) for security considerations.
 

@@ -26,7 +26,11 @@ pub mod server;
 
 pub use client::{AcpClient, AcpClientConfig, ConnectionState};
 pub use message::*;
-pub use server::{AcpServer, AgentConnection, DefaultHandler, MessageHandler};
+pub use server::{
+    AcpAuthConfig, AcpServer, AgentConnection, ApiKeyMetadata, BackpressureConfig,
+    BackpressureMetrics, BroadcastResult, ConnectionBackpressureInfo, DefaultHandler,
+    MessageHandler, SendResult, TaskResponse,
+};
 
 // Re-export core ACP types
 pub use cca_core::communication::{AcpError, AcpMessage};

@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::extract::{Path, State};
+use axum::http::{HeaderValue, Method};
 use axum::{
     routing::{get, post},
     Json, Router,
@@ -16,14 +17,22 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use cca_acp::AcpServer;
 use cca_core::{AgentRole, AgentId, TaskId};
+use cca_core::util::safe_truncate;
+use cca_rl::{Action, Experience, State as RLState, state::AgentState as RLAgentState};
 
-use crate::agent_manager::AgentManager;
-use crate::auth::{auth_middleware, AuthConfig};
+use crate::rl::compute_reward;
+
+use crate::agent_manager::{AgentManager, apply_permissions_to_command};
+use crate::auth::{
+    auth_middleware, create_rate_limiter_state, rate_limit_middleware,
+    AuthConfig, RateLimitConfig,
+};
 use crate::config::Config;
 use crate::orchestrator::Orchestrator;
 use crate::postgres::PostgresServices;
@@ -43,6 +52,11 @@ pub struct DaemonState {
     pub acp_server: Arc<AcpServer>,
     pub rl_service: Arc<RLService>,
     pub token_service: Arc<TokenService>,
+    pub tmux_manager: Arc<crate::tmux::TmuxManager>,
+    /// Track which agents are currently busy with a task
+    pub busy_agents: Arc<RwLock<HashMap<AgentId, String>>>,
+    /// Cached health check result - PERF-003
+    health_cache: Arc<RwLock<Option<CachedHealthCheck>>>,
 }
 
 /// Task tracking state
@@ -97,7 +111,7 @@ impl CCADaemon {
             }
         };
 
-        // Initialize ACP WebSocket server
+        // Initialize ACP WebSocket server with authentication
         let acp_addr: SocketAddr = format!("127.0.0.1:{}", config.acp.websocket_port)
             .parse()
             .map_err(|e| anyhow::anyhow!(
@@ -105,8 +119,30 @@ impl CCADaemon {
                 config.acp.websocket_port,
                 e
             ))?;
-        let acp_server = Arc::new(AcpServer::new(acp_addr));
-        info!("ACP server configured on port {}", config.acp.websocket_port);
+
+        // Convert api_key_configs to ApiKeyMetadata for role-based authorization
+        let api_key_metadata: Vec<cca_acp::ApiKeyMetadata> = config
+            .daemon
+            .api_key_configs
+            .iter()
+            .map(|cfg| cca_acp::ApiKeyMetadata {
+                key: cfg.key.clone(),
+                allowed_roles: cfg.allowed_roles.clone(),
+                key_id: cfg.key_id.clone(),
+            })
+            .collect();
+
+        let acp_auth_config = cca_acp::AcpAuthConfig {
+            api_keys: config.daemon.api_keys.clone(),
+            api_key_metadata,
+            require_auth: config.daemon.is_auth_required(),
+        };
+        let acp_server = Arc::new(AcpServer::with_auth(acp_addr, acp_auth_config));
+        info!(
+            "ACP server configured on port {} (auth: {})",
+            config.acp.websocket_port,
+            if config.daemon.is_auth_required() { "enabled" } else { "disabled" }
+        );
 
         // Initialize RL service
         let rl_config = RLConfig::default();
@@ -133,6 +169,12 @@ impl CCADaemon {
         let token_service = Arc::new(TokenService::new());
         info!("Token efficiency service initialized");
 
+        // Initialize Tmux manager for auto-spawning agents
+        let tmux_manager = Arc::new(crate::tmux::TmuxManager::new());
+        if tmux_manager.is_available() {
+            info!("Tmux auto-spawn enabled (max {} agents)", crate::tmux::MAX_AUTO_AGENTS);
+        }
+
         let state = DaemonState {
             config: config.clone(),
             agent_manager: agent_manager.clone(),
@@ -143,6 +185,9 @@ impl CCADaemon {
             acp_server,
             rl_service,
             token_service,
+            tmux_manager,
+            busy_agents: Arc::new(RwLock::new(HashMap::new())),
+            health_cache: Arc::new(RwLock::new(None)),
         };
 
         Ok(Self {
@@ -181,6 +226,12 @@ impl CCADaemon {
             self.config.acp.websocket_port
         );
 
+        // Start task cleanup background job (STABILITY: prevent unbounded task HashMap growth)
+        let tasks_ref = self.state.tasks.clone();
+        let cleanup_task = tokio::spawn(async move {
+            task_cleanup_job(tasks_ref).await;
+        });
+
         // Serve HTTP API with graceful shutdown
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -191,6 +242,7 @@ impl CCADaemon {
         // Shutdown ACP server
         self.state.acp_server.shutdown();
         acp_task.abort();
+        cleanup_task.abort();
 
         Ok(())
     }
@@ -206,20 +258,36 @@ impl CCADaemon {
         let mut manager = self.state.agent_manager.write().await;
         manager.stop_all().await?;
 
+        // Cleanup auto-spawned tmux agents
+        self.state.tmux_manager.cleanup().await;
+
         info!("Daemon shutdown complete");
         Ok(())
     }
 }
 
 /// Create the API router with state
+/// SEC-004: Includes per-IP rate limiting middleware for DoS protection
 fn create_router(state: DaemonState) -> Router {
     // Create auth config from daemon config
+    // SECURITY: Use is_auth_required() which enforces auth in production builds
     let auth_config = AuthConfig {
         api_keys: state.config.daemon.api_keys.clone(),
-        required: state.config.daemon.require_auth,
+        required: state.config.daemon.is_auth_required(),
     };
 
-    Router::new()
+    // SEC-004: Create per-IP and per-API-key rate limiter from config
+    let rate_limit_config = RateLimitConfig {
+        requests_per_second: state.config.daemon.rate_limit_rps,
+        burst_size: state.config.daemon.rate_limit_burst,
+        global_rps: state.config.daemon.rate_limit_global_rps,
+        trust_proxy: state.config.daemon.rate_limit_trust_proxy,
+        api_key_rps: state.config.daemon.rate_limit_api_key_rps,
+        api_key_burst: state.config.daemon.rate_limit_api_key_burst,
+    };
+    let rate_limiter = create_rate_limiter_state(&rate_limit_config);
+
+    let mut router = Router::new()
         .route("/health", get(health_check))
         .route("/api/v1/health", get(health_check))
         .route("/api/v1/status", get(get_status))
@@ -253,8 +321,175 @@ fn create_router(state: DaemonState) -> Router {
         .route("/api/v1/tokens/metrics", get(tokens_metrics))
         .route("/api/v1/tokens/recommendations", get(tokens_recommendations))
         // Apply auth middleware (bypasses /health automatically)
-        .layer(axum::middleware::from_fn_with_state(auth_config, auth_middleware))
-        .with_state(state)
+        .layer(axum::middleware::from_fn_with_state(auth_config, auth_middleware));
+
+    // SEC-004: Apply per-IP and per-API-key rate limiting if configured (rate_limit_rps > 0)
+    if state.config.daemon.rate_limit_rps > 0 {
+        info!(
+            "Rate limiting enabled: {} req/s per IP (burst: {}), {} req/s per API key (burst: {}), global: {} req/s",
+            rate_limit_config.requests_per_second,
+            rate_limit_config.burst_size,
+            rate_limit_config.api_key_rps,
+            rate_limit_config.api_key_burst,
+            rate_limit_config.global_rps
+        );
+        router = router.layer(axum::middleware::from_fn_with_state(rate_limiter, rate_limit_middleware));
+    }
+
+    // SEC-010: Apply CORS middleware if origins are configured
+    let cors_origins = &state.config.daemon.cors_origins;
+    if !cors_origins.is_empty() {
+        let cors = build_cors_layer(
+            cors_origins,
+            state.config.daemon.cors_allow_credentials,
+            state.config.daemon.cors_max_age_secs,
+        );
+        info!(
+            "CORS enabled for {} origin(s), credentials: {}, max_age: {}s",
+            cors_origins.len(),
+            state.config.daemon.cors_allow_credentials,
+            state.config.daemon.cors_max_age_secs
+        );
+        router = router.layer(cors);
+    } else {
+        debug!("CORS disabled (no origins configured)");
+    }
+
+    router.with_state(state)
+}
+
+/// SEC-010: Build CORS layer with explicit allowed origins configuration
+///
+/// SECURITY: This function enforces secure CORS defaults:
+/// - Only allows explicitly configured origins (no wildcards in production)
+/// - Restricts allowed methods to safe API operations (GET, POST, OPTIONS)
+/// - Restricts allowed headers to standard API headers
+/// - Warns if credentials are enabled with wildcard origins
+fn build_cors_layer(
+    origins: &[String],
+    allow_credentials: bool,
+    max_age_secs: u64,
+) -> CorsLayer {
+    // SEC-010: Check for wildcard origin - warn if credentials enabled
+    let has_wildcard = origins.iter().any(|o| o == "*");
+    if has_wildcard && allow_credentials {
+        warn!(
+            "SEC-010: CORS credentials enabled with wildcard origin '*' is insecure! \
+             Credentials will be DISABLED. Use explicit origins instead."
+        );
+    }
+
+    // Build allowed origins
+    let allow_origin = if has_wildcard {
+        // Wildcard - for development only
+        warn!("SEC-010: Using wildcard CORS origin '*' - this should only be used in development!");
+        AllowOrigin::any()
+    } else {
+        // Explicit origins - parse and validate each one
+        let parsed_origins: Vec<HeaderValue> = origins
+            .iter()
+            .filter_map(|origin| {
+                match origin.parse::<HeaderValue>() {
+                    Ok(hv) => Some(hv),
+                    Err(e) => {
+                        warn!("SEC-010: Invalid CORS origin '{}': {}", origin, e);
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        if parsed_origins.is_empty() {
+            warn!("SEC-010: No valid CORS origins after parsing, using restrictive default");
+            AllowOrigin::exact("https://localhost".parse().unwrap())
+        } else {
+            AllowOrigin::list(parsed_origins)
+        }
+    };
+
+    // Build the CORS layer with secure defaults
+    let mut cors = CorsLayer::new()
+        .allow_origin(allow_origin)
+        // SEC-010: Only allow safe HTTP methods for API
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        // SEC-010: Allow standard API headers
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::ACCEPT,
+            axum::http::header::ORIGIN,
+            // Custom header for API key auth
+            axum::http::header::HeaderName::from_static("x-api-key"),
+        ])
+        // SEC-010: Cache preflight requests
+        .max_age(std::time::Duration::from_secs(max_age_secs));
+
+    // SEC-010: Only allow credentials with explicit origins (not wildcard)
+    if allow_credentials && !has_wildcard {
+        cors = cors.allow_credentials(true);
+    }
+
+    cors
+}
+
+/// Health check cache TTL (5 seconds) - PERF-003
+const HEALTH_CHECK_TTL_SECS: u64 = 5;
+
+/// Task time-to-live for cleanup (1 hour)
+const TASK_TTL_SECS: i64 = 3600;
+/// Maximum number of tasks to keep in memory
+const MAX_TASKS: usize = 10_000;
+/// How often to run task cleanup (5 minutes)
+const TASK_CLEANUP_INTERVAL_SECS: u64 = 300;
+
+/// Background job to clean up old tasks and prevent unbounded memory growth
+async fn task_cleanup_job(tasks: Arc<RwLock<HashMap<String, TaskState>>>) {
+    use tokio::time::{interval, Duration};
+
+    let mut cleanup_interval = interval(Duration::from_secs(TASK_CLEANUP_INTERVAL_SECS));
+
+    loop {
+        cleanup_interval.tick().await;
+
+        let now = Utc::now();
+        let cutoff = now - chrono::Duration::seconds(TASK_TTL_SECS);
+
+        let mut tasks = tasks.write().await;
+        let before_count = tasks.len();
+
+        // Remove completed/failed tasks older than TTL
+        tasks.retain(|_id, task| {
+            // Keep pending/in_progress tasks
+            if task.status == "pending" || task.status == "in_progress" {
+                return true;
+            }
+            // Remove old completed/failed tasks
+            task.updated_at > cutoff
+        });
+
+        // If still over limit, remove oldest completed tasks
+        if tasks.len() > MAX_TASKS {
+            let mut completed_tasks: Vec<_> = tasks
+                .iter()
+                .filter(|(_, t)| t.status == "completed" || t.status == "failed")
+                .map(|(id, t)| (id.clone(), t.updated_at))
+                .collect();
+
+            // Sort by updated_at (oldest first)
+            completed_tasks.sort_by_key(|(_, updated_at)| *updated_at);
+
+            // Remove oldest tasks until under limit
+            let to_remove = tasks.len().saturating_sub(MAX_TASKS);
+            for (id, _) in completed_tasks.into_iter().take(to_remove) {
+                tasks.remove(&id);
+            }
+        }
+
+        let removed = before_count.saturating_sub(tasks.len());
+        if removed > 0 {
+            info!("Task cleanup: removed {} old tasks, {} remaining", removed, tasks.len());
+        }
+    }
 }
 
 // API Request/Response types
@@ -264,6 +499,45 @@ const MAX_TASK_DESCRIPTION_LEN: usize = 100_000;   // 100KB
 const MAX_BROADCAST_MESSAGE_LEN: usize = 10_000;   // 10KB
 const MAX_CONTENT_LEN: usize = 1_000_000;          // 1MB
 const MAX_QUERY_LEN: usize = 1_000;                // 1KB
+
+/// SEC-009: Sanitize broadcast message content to prevent injection attacks
+/// Removes or escapes potentially dangerous content before forwarding to agents
+fn sanitize_broadcast_message(message: &str) -> String {
+    let mut sanitized = String::with_capacity(message.len());
+
+    for ch in message.chars() {
+        match ch {
+            // Allow printable ASCII, newlines, and tabs
+            '\n' | '\t' | '\r' => sanitized.push(ch),
+            // Remove null bytes and other control characters (except newline/tab/cr)
+            c if c.is_control() => {
+                // Skip control characters - potential injection vectors
+            }
+            // Allow normal printable characters including unicode
+            c => sanitized.push(c),
+        }
+    }
+
+    // Trim excessive whitespace (prevent whitespace-based DoS)
+    let trimmed = sanitized.trim();
+
+    // Collapse multiple consecutive newlines to max 2
+    let mut result = String::with_capacity(trimmed.len());
+    let mut consecutive_newlines = 0;
+    for ch in trimmed.chars() {
+        if ch == '\n' {
+            consecutive_newlines += 1;
+            if consecutive_newlines <= 2 {
+                result.push(ch);
+            }
+        } else {
+            consecutive_newlines = 0;
+            result.push(ch);
+        }
+    }
+
+    result
+}
 
 /// Coordinator system prompt - enforces JSON delegation output
 const COORDINATOR_SYSTEM_PROMPT: &str = r#"You are a COORDINATOR agent. You do NOT execute tasks yourself.
@@ -337,6 +611,8 @@ pub struct DelegateTaskResponse {
     pub output: Option<String>,
     pub error: Option<String>,
     pub duration_ms: u64,
+    #[serde(default)]
+    pub tokens_used: u64,
 }
 
 /// Coordinator response format for delegation decisions
@@ -377,6 +653,8 @@ pub struct SendToAgentResponse {
     pub output: Option<String>,
     pub error: Option<String>,
     pub duration_ms: u64,
+    #[serde(default)]
+    pub tokens_used: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -390,7 +668,7 @@ pub struct AgentInfo {
 // API handlers
 
 /// Health check response with service status
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
     pub version: &'static str,
@@ -398,14 +676,33 @@ pub struct HealthResponse {
 }
 
 /// Individual service health status
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ServiceHealth {
     pub redis: bool,
     pub postgres: bool,
     pub acp: bool,
 }
 
+/// Cached health check result - PERF-003
+#[derive(Debug, Clone)]
+struct CachedHealthCheck {
+    response: HealthResponse,
+    cached_at: std::time::Instant,
+}
+
 async fn health_check(State(state): State<DaemonState>) -> Json<HealthResponse> {
+    // PERF-003: Check cache first
+    {
+        let cache = state.health_cache.read().await;
+        if let Some(ref cached) = *cache {
+            if cached.cached_at.elapsed().as_secs() < HEALTH_CHECK_TTL_SECS {
+                debug!("Returning cached health check response");
+                return Json(cached.response.clone());
+            }
+        }
+    }
+
+    // Cache miss or expired - perform actual health check
     let redis_ok = state.redis.is_some();
     let postgres_ok = state.postgres.is_some();
 
@@ -415,7 +712,7 @@ async fn health_check(State(state): State<DaemonState>) -> Json<HealthResponse> 
         "degraded"
     };
 
-    Json(HealthResponse {
+    let response = HealthResponse {
         status,
         version: env!("CARGO_PKG_VERSION"),
         services: ServiceHealth {
@@ -423,7 +720,18 @@ async fn health_check(State(state): State<DaemonState>) -> Json<HealthResponse> 
             postgres: postgres_ok,
             acp: true, // Always true if daemon is running
         },
-    })
+    };
+
+    // Update cache
+    {
+        let mut cache = state.health_cache.write().await;
+        *cache = Some(CachedHealthCheck {
+            response: response.clone(),
+            cached_at: std::time::Instant::now(),
+        });
+    }
+
+    Json(response)
 }
 
 async fn get_status(State(state): State<DaemonState>) -> Json<serde_json::Value> {
@@ -433,12 +741,30 @@ async fn get_status(State(state): State<DaemonState>) -> Json<serde_json::Value>
     let pending = tasks.values().filter(|t| t.status == "pending").count();
     let completed = tasks.values().filter(|t| t.status == "completed").count();
 
+    // Get auto-spawned tmux agents info
+    let tmux_agents = state.tmux_manager.list_agents().await;
+    let tmux_agents_info: Vec<serde_json::Value> = tmux_agents
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "role": a.role,
+                "window": a.window_name,
+                "pane_id": a.pane_id,
+                "uptime_secs": a.spawned_at.elapsed().as_secs()
+            })
+        })
+        .collect();
+
     Json(serde_json::json!({
         "status": "running",
         "version": env!("CARGO_PKG_VERSION"),
         "agents_count": agents.list().len(),
         "tasks_pending": pending,
-        "tasks_completed": completed
+        "tasks_completed": completed,
+        "tmux": {
+            "available": state.tmux_manager.is_available(),
+            "auto_spawned_agents": tmux_agents_info
+        }
     }))
 }
 
@@ -535,6 +861,7 @@ async fn send_to_agent(
                 MAX_TASK_DESCRIPTION_LEN
             )),
             duration_ms: start.elapsed().as_millis() as u64,
+            tokens_used: 0,
         });
     }
 
@@ -547,6 +874,7 @@ async fn send_to_agent(
                 output: None,
                 error: Some(format!("Invalid agent ID: {}", agent_id)),
                 duration_ms: start.elapsed().as_millis() as u64,
+                tokens_used: 0,
             });
         }
     };
@@ -562,6 +890,7 @@ async fn send_to_agent(
                     output: None,
                     error: Some(e.to_string()),
                     duration_ms: start.elapsed().as_millis() as u64,
+                    tokens_used: 0,
                 });
             }
         }
@@ -571,25 +900,22 @@ async fn send_to_agent(
         "Sending task to {} agent {}: {}",
         config.role,
         agent_id,
-        if request.message.len() > 100 {
-            &request.message[..100]
-        } else {
-            &request.message
-        }
+        safe_truncate(&request.message, 100)
     );
 
-    warn!(
-        "Agent {} running with --dangerously-skip-permissions. \
-         Ensure environment is properly sandboxed.",
-        agent_id
-    );
+    // SEC-007: Apply permission configuration instead of blanket --dangerously-skip-permissions
+    let permissions = state.config.agents.permissions.clone();
+    let role_str = config.role.to_string();
 
     // Step 2: Execute Claude Code WITHOUT holding the lock
     let timeout = std::time::Duration::from_secs(request.timeout_seconds);
     let result = tokio::time::timeout(timeout, async {
-        tokio::process::Command::new(&config.claude_path)
-            .arg("--dangerously-skip-permissions")
-            .arg("--print")
+        let mut cmd = tokio::process::Command::new(&config.claude_path);
+
+        // Apply permission configuration
+        apply_permissions_to_command(&mut cmd, &permissions, &role_str);
+
+        cmd.arg("--print")
             .arg("--output-format")
             .arg("text")
             .arg(&request.message)
@@ -619,6 +945,7 @@ async fn send_to_agent(
                 output: Some(response),
                 error: None,
                 duration_ms: start.elapsed().as_millis() as u64,
+                tokens_used: 0,
             })
         }
         Ok(Ok(output)) => {
@@ -633,6 +960,7 @@ async fn send_to_agent(
                 output: None,
                 error: Some(format!("Claude Code failed: {}", stderr)),
                 duration_ms: start.elapsed().as_millis() as u64,
+                tokens_used: 0,
             })
         }
         Ok(Err(e)) => {
@@ -646,6 +974,7 @@ async fn send_to_agent(
                 output: None,
                 error: Some(e),
                 duration_ms: start.elapsed().as_millis() as u64,
+                tokens_used: 0,
             })
         }
         Err(_) => {
@@ -663,6 +992,7 @@ async fn send_to_agent(
                     request.timeout_seconds
                 )),
                 duration_ms: start.elapsed().as_millis() as u64,
+                tokens_used: 0,
             })
         }
     }
@@ -760,6 +1090,42 @@ async fn delegate_task(
 ) -> Json<DelegateTaskResponse> {
     let start = std::time::Instant::now();
 
+    // SEC-008: Input validation - check task length
+    if request.task.len() > MAX_TASK_DESCRIPTION_LEN {
+        return Json(DelegateTaskResponse {
+            success: false,
+            agent_id: String::new(),
+            role: request.role.clone(),
+            output: None,
+            error: Some(format!(
+                "Task too long: {} bytes (max: {} bytes)",
+                request.task.len(),
+                MAX_TASK_DESCRIPTION_LEN
+            )),
+            duration_ms: start.elapsed().as_millis() as u64,
+            tokens_used: 0,
+        });
+    }
+
+    // SEC-008: Input validation - check context length
+    if let Some(ref ctx) = request.context {
+        if ctx.len() > MAX_TASK_DESCRIPTION_LEN {
+            return Json(DelegateTaskResponse {
+                success: false,
+                agent_id: String::new(),
+                role: request.role.clone(),
+                output: None,
+                error: Some(format!(
+                    "Context too long: {} bytes (max: {} bytes)",
+                    ctx.len(),
+                    MAX_TASK_DESCRIPTION_LEN
+                )),
+                duration_ms: start.elapsed().as_millis() as u64,
+                tokens_used: 0,
+            });
+        }
+    }
+
     // Parse role
     let role = match request.role.to_lowercase().as_str() {
         "frontend" => AgentRole::Frontend,
@@ -776,6 +1142,7 @@ async fn delegate_task(
                 output: None,
                 error: Some(format!("Unknown agent role: {}. Valid roles: frontend, backend, dba, devops, security, qa", request.role)),
                 duration_ms: start.elapsed().as_millis() as u64,
+                tokens_used: 0,
             });
         }
     };
@@ -814,6 +1181,7 @@ async fn delegate_task(
                         output: None,
                         error: Some(format!("Failed to spawn {} agent: {}", request.role, e)),
                         duration_ms: start.elapsed().as_millis() as u64,
+                        tokens_used: 0,
                     });
                 }
             }
@@ -840,6 +1208,7 @@ async fn delegate_task(
                     output: None,
                     error: Some(e.to_string()),
                     duration_ms: start.elapsed().as_millis() as u64,
+                    tokens_used: 0,
                 });
             }
         }
@@ -849,21 +1218,22 @@ async fn delegate_task(
         "Sending task to {} agent {}: {}",
         config.role,
         agent_id,
-        if message.len() > 100 { &message[..100] } else { &message }
+        safe_truncate(&message, 100)
     );
 
-    warn!(
-        "Agent {} running with --dangerously-skip-permissions. \
-         Ensure environment is properly sandboxed.",
-        agent_id
-    );
+    // SEC-007: Apply permission configuration instead of blanket --dangerously-skip-permissions
+    let permissions = state.config.agents.permissions.clone();
+    let role_str = config.role.to_string();
 
     // Step 2: Execute Claude Code WITHOUT holding the lock
     let timeout = std::time::Duration::from_secs(request.timeout_seconds);
     let result = tokio::time::timeout(timeout, async {
-        tokio::process::Command::new(&config.claude_path)
-            .arg("--dangerously-skip-permissions")
-            .arg("--print")
+        let mut cmd = tokio::process::Command::new(&config.claude_path);
+
+        // Apply permission configuration
+        apply_permissions_to_command(&mut cmd, &permissions, &role_str);
+
+        cmd.arg("--print")
             .arg("--output-format")
             .arg("text")
             .arg(&message)
@@ -895,6 +1265,7 @@ async fn delegate_task(
                 output: Some(response),
                 error: None,
                 duration_ms: start.elapsed().as_millis() as u64,
+                tokens_used: 0,
             })
         }
         Ok(Ok(output)) => {
@@ -911,6 +1282,7 @@ async fn delegate_task(
                 output: None,
                 error: Some(format!("Agent error: {}", stderr)),
                 duration_ms: start.elapsed().as_millis() as u64,
+                tokens_used: 0,
             })
         }
         Ok(Err(e)) => {
@@ -926,6 +1298,7 @@ async fn delegate_task(
                 output: None,
                 error: Some(format!("Agent error: {}", e)),
                 duration_ms: start.elapsed().as_millis() as u64,
+                tokens_used: 0,
             })
         }
         Err(_) => {
@@ -942,6 +1315,7 @@ async fn delegate_task(
                 output: None,
                 error: Some(format!("Timeout after {} seconds", request.timeout_seconds)),
                 duration_ms: start.elapsed().as_millis() as u64,
+                tokens_used: 0,
             })
         }
     }
@@ -1049,22 +1423,52 @@ async fn create_task(
     info!(
         "Sending task to coordinator {} via WebSocket: {}",
         coordinator_id,
-        if request.description.len() > 100 { &request.description[..100] } else { &request.description }
+        safe_truncate(&request.description, 100)
     );
 
-    // Step 2: Send task to coordinator via WebSocket
-    // Include the coordinator system prompt as context
+    // Step 2: Get available workers to inform coordinator
+    let agents_with_roles = state.acp_server.agents_with_roles().await;
+    let available_roles: Vec<String> = agents_with_roles
+        .iter()
+        .filter_map(|(_, role_opt)| {
+            let role = role_opt.as_ref()?;
+            if role != "coordinator" && role != "unregistered" {
+                Some(role.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Build context with system prompt and available workers
+    let workers_info = if available_roles.is_empty() {
+        "IMPORTANT: No specialist workers are currently connected. \
+         You MUST return an error response telling the user to start the required worker(s).\n\
+         Example: {\"action\":\"error\",\"error\":\"No workers available. Start required workers with: cca agent worker <role>\",\"required_workers\":[\"backend\"]}".to_string()
+    } else {
+        format!(
+            "Available workers: {}. Only delegate to these roles. \
+             If a required role is not available, return an error response listing the missing workers.",
+            available_roles.join(", ")
+        )
+    };
+    let context = format!("{}\n\n{}", COORDINATOR_SYSTEM_PROMPT, workers_info);
+
+    // Send task to coordinator via WebSocket
     let timeout = std::time::Duration::from_secs(state.config.agents.default_timeout_seconds);
     let result = state.acp_server.send_task(
         coordinator_id,
         &request.description,
-        Some(COORDINATOR_SYSTEM_PROMPT),
+        Some(&context),
         timeout,
     ).await;
 
     // Step 3: Process coordinator's response
     match result {
-        Ok(coordinator_output) => {
+        Ok(coordinator_response) => {
+            let coordinator_output = coordinator_response.output;
+            let _coordinator_tokens = coordinator_response.tokens_used; // Available for future use
+
             info!(
                 "Coordinator {} returned output ({} bytes) for task {}",
                 coordinator_id,
@@ -1112,6 +1516,53 @@ async fn create_task(
                                     }
                                 }
                                 combined_output.push_str("\n\n");
+                            }
+
+                            // FIX 1: Record RL experiences for each delegation result
+                            for result in &delegation_results {
+                                if !result.agent_id.is_empty() {
+                                    // Build RL state from task context
+                                    let rl_state = RLState {
+                                        task_type: result.role.clone(),
+                                        available_agents: vec![RLAgentState {
+                                            role: AgentRole::from(result.role.as_str()),
+                                            is_busy: false,
+                                            success_rate: if result.success { 1.0 } else { 0.0 },
+                                            avg_completion_time: result.duration_ms as f64,
+                                        }],
+                                        token_usage: result.tokens_used as f64 / 100_000.0, // Normalized
+                                        success_history: vec![if result.success { 1.0 } else { 0.0 }],
+                                        complexity: 0.5,
+                                        features: vec![],
+                                    };
+
+                                    // Action was routing to this agent's role
+                                    let action = Action::RouteToAgent(AgentRole::from(result.role.as_str()));
+
+                                    // Compute reward based on success, tokens, and duration
+                                    let reward = compute_reward(
+                                        result.success,
+                                        result.tokens_used as u32,
+                                        result.duration_ms as u32,
+                                        100_000, // max_tokens
+                                        300_000, // max_duration_ms (5 min)
+                                    );
+
+                                    let experience = Experience::new(
+                                        rl_state.clone(),
+                                        action,
+                                        reward,
+                                        Some(rl_state), // next_state same as current for terminal
+                                        true, // done
+                                    );
+
+                                    if let Err(e) = state.rl_service.record_experience(experience).await {
+                                        warn!("Failed to record RL experience for {} agent: {}", result.role, e);
+                                    } else {
+                                        debug!("Recorded RL experience: role={}, success={}, reward={:.3}",
+                                            result.role, result.success, reward);
+                                    }
+                                }
                             }
 
                             // Update task state
@@ -1320,22 +1771,31 @@ fn extract_json_from_output(output: &str) -> Option<String> {
     }
 
     // Look for ```json code blocks
+    // Safety: "```json" is 7 ASCII bytes, so start + 7 is always a valid UTF-8 boundary
     if let Some(start) = trimmed.find("```json") {
-        let json_start = start + 7;
-        if let Some(end) = trimmed[json_start..].find("```") {
-            return Some(trimmed[json_start..json_start + end].trim().to_string());
+        let json_start = start + 7; // "```json".len()
+        if json_start <= trimmed.len() {
+            if let Some(end) = trimmed[json_start..].find("```") {
+                let json_end = json_start + end;
+                return Some(trimmed[json_start..json_end].trim().to_string());
+            }
         }
     }
 
     // Look for ``` code blocks (might not be marked as json)
+    // Safety: "```\n" is 4 ASCII bytes, so start + 4 is always a valid UTF-8 boundary
     if let Some(start) = trimmed.find("```\n{") {
-        let json_start = start + 4;
-        if let Some(end) = trimmed[json_start..].find("```") {
-            return Some(trimmed[json_start..json_start + end].trim().to_string());
+        let json_start = start + 4; // "```\n".len()
+        if json_start <= trimmed.len() {
+            if let Some(end) = trimmed[json_start..].find("```") {
+                let json_end = json_start + end;
+                return Some(trimmed[json_start..json_end].trim().to_string());
+            }
         }
     }
 
     // Look for first { in the output
+    // Safety: '{' is ASCII, so `start` is always a valid UTF-8 boundary
     if let Some(start) = trimmed.find('{') {
         let json_part = &trimmed[start..];
         let mut depth = 0;
@@ -1361,6 +1821,51 @@ fn extract_json_from_output(output: &str) -> Option<String> {
     None
 }
 
+/// P2: Store a successful task completion as a pattern in the ReasoningBank
+async fn store_task_as_pattern(
+    state: &DaemonState,
+    agent_id: AgentId,
+    role: &str,
+    task_description: &str,
+    output: &str,
+    duration_ms: u64,
+) {
+    // Only store patterns if PostgreSQL is configured
+    let Some(postgres_services) = &state.postgres else {
+        return;
+    };
+
+    // Build metadata with task context
+    let metadata = serde_json::json!({
+        "agent_id": agent_id.to_string(),
+        "role": role.to_lowercase(),
+        "task": safe_truncate(task_description, 200),
+        "duration_ms": duration_ms,
+        "timestamp": Utc::now().to_rfc3339(),
+        "pattern_source": "automatic_task_completion"
+    });
+
+    // Store the pattern with Solution type
+    match postgres_services
+        .patterns
+        .create(
+            Some(agent_id.0), // Extract Uuid from AgentId
+            crate::postgres::PatternType::Solution,
+            output,
+            None, // No embedding yet
+            metadata,
+        )
+        .await
+    {
+        Ok(pattern_id) => {
+            debug!("Stored pattern {} for {} agent {} ({}ms)", pattern_id, role, agent_id, duration_ms);
+        }
+        Err(e) => {
+            warn!("Failed to store pattern for {} agent {}: {}", role, agent_id, e);
+        }
+    }
+}
+
 /// Execute delegations to specialist agents
 async fn execute_delegations(
     state: &DaemonState,
@@ -1370,7 +1875,7 @@ async fn execute_delegations(
 
     for delegation in delegations {
         info!("Executing delegation to {}: {}", delegation.role,
-              if delegation.task.len() > 50 { &delegation.task[..50] } else { &delegation.task });
+              safe_truncate(&delegation.task, 50));
 
         // Validate role (must be a known role)
         let _role = match delegation.role.to_lowercase().as_str() {
@@ -1388,6 +1893,7 @@ async fn execute_delegations(
                     output: None,
                     error: Some(format!("Unknown role: {}", delegation.role)),
                     duration_ms: 0,
+                    tokens_used: 0,
                 });
                 continue;
             }
@@ -1395,31 +1901,114 @@ async fn execute_delegations(
 
         let start = std::time::Instant::now();
 
-        // Find a connected agent with this role via WebSocket
-        let agent_id = state.acp_server.find_agent_by_role(&delegation.role).await;
+        // Find an available (not busy) agent with this role
+        let agent_id = find_available_agent(state, &delegation.role).await;
 
         let agent_id = match agent_id {
             Some(id) => {
-                info!("Found connected {} agent: {}", delegation.role, id);
+                info!("Found available {} agent: {}", delegation.role, id);
                 id
             }
             None => {
-                warn!("No {} agent connected via WebSocket. Start one with: cca agent worker {}",
-                      delegation.role, delegation.role);
-                results.push(DelegateTaskResponse {
-                    success: false,
-                    agent_id: String::new(),
-                    role: delegation.role.clone(),
-                    output: None,
-                    error: Some(format!(
-                        "No {} agent connected. Start one with: cca agent worker {}",
-                        delegation.role, delegation.role
-                    )),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                });
-                continue;
+                // No available agent - try to spawn one via tmux
+                if state.tmux_manager.is_available() {
+                    // Check how many tmux-spawned agents we have for this role already
+                    let existing_tmux_agents = state.tmux_manager.agents_by_role(&delegation.role).await;
+                    if existing_tmux_agents.len() >= 2 {
+                        // Don't spawn more than 2 agents per role via tmux
+                        results.push(DelegateTaskResponse {
+                            success: false,
+                            agent_id: String::new(),
+                            role: delegation.role.clone(),
+                            output: None,
+                            error: Some(format!(
+                                "No available {} agent. {} agents spawned but all busy.",
+                                delegation.role, existing_tmux_agents.len()
+                            )),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            tokens_used: 0,
+                        });
+                        continue;
+                    }
+
+                    info!("No available {} agent, attempting to spawn via tmux (existing: {})",
+                          delegation.role, existing_tmux_agents.len());
+                    match state.tmux_manager.spawn_agent(&delegation.role).await {
+                        Ok(pane_id) => {
+                            info!("Spawned {} agent in tmux pane {}", delegation.role, pane_id);
+                            // Wait a bit for the agent to connect
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                            // Try to find it again
+                            match state.acp_server.find_agent_by_role(&delegation.role).await {
+                                Some(id) => id,
+                                None => {
+                                    warn!("Spawned agent hasn't connected yet");
+                                    results.push(DelegateTaskResponse {
+                                        success: false,
+                                        agent_id: String::new(),
+                                        role: delegation.role.clone(),
+                                        output: None,
+                                        error: Some(format!(
+                                            "Agent spawned but not connected. Try again in a moment."
+                                        )),
+                                        duration_ms: start.elapsed().as_millis() as u64,
+                                        tokens_used: 0,
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to spawn {} agent via tmux: {}", delegation.role, e);
+                            results.push(DelegateTaskResponse {
+                                success: false,
+                                agent_id: String::new(),
+                                role: delegation.role.clone(),
+                                output: None,
+                                error: Some(format!(
+                                    "No {} agent available. Start one with: cca agent worker {}",
+                                    delegation.role, delegation.role
+                                )),
+                                duration_ms: start.elapsed().as_millis() as u64,
+                                tokens_used: 0,
+                            });
+                            continue;
+                        }
+                    }
+                } else {
+                    warn!("No {} agent connected. Start one with: cca agent worker {}",
+                          delegation.role, delegation.role);
+                    results.push(DelegateTaskResponse {
+                        success: false,
+                        agent_id: String::new(),
+                        role: delegation.role.clone(),
+                        output: None,
+                        error: Some(format!(
+                            "No {} agent connected. Start one with: cca agent worker {}",
+                            delegation.role, delegation.role
+                        )),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        tokens_used: 0,
+                    });
+                    continue;
+                }
             }
         };
+
+        // Mark agent as busy
+        {
+            let mut busy = state.busy_agents.write().await;
+            busy.insert(agent_id, delegation.task.clone());
+        }
+
+        // P1: Update Redis activity - agent is now working on task
+        update_agent_redis_state(
+            &state.redis,
+            agent_id,
+            &delegation.role,
+            "busy",
+            Some(TaskId::new()),
+        ).await;
 
         info!("Sending task to {} agent {} via WebSocket", delegation.role, agent_id);
 
@@ -1432,17 +2021,61 @@ async fn execute_delegations(
             timeout,
         ).await;
 
-        // Record result
+        // Record result and unmark agent as busy
+        {
+            let mut busy = state.busy_agents.write().await;
+            busy.remove(&agent_id);
+        }
+
+        // P1: Update Redis activity - agent is now idle
+        update_agent_redis_state(
+            &state.redis,
+            agent_id,
+            &delegation.role,
+            "idle",
+            None,
+        ).await;
+
         match result {
-            Ok(output) => {
-                info!("{} agent completed task in {}ms", delegation.role, start.elapsed().as_millis());
+            Ok(task_response) => {
+                let duration_ms = start.elapsed().as_millis() as u64;
+                let tokens_used = task_response.tokens_used;
+                let output = task_response.output;
+
+                info!("{} agent completed task in {}ms (tokens: {})", delegation.role, duration_ms, tokens_used);
+
+                // P1: Track token usage from worker response
+                if tokens_used > 0 {
+                    use crate::tokens::TokenUsage;
+                    let usage = TokenUsage {
+                        agent_id,
+                        input_tokens: 0,
+                        output_tokens: tokens_used as u32,
+                        total_tokens: tokens_used as u32,
+                        context_tokens: 0,
+                        timestamp: Utc::now().timestamp(),
+                    };
+                    state.token_service.metrics.record(usage).await;
+                }
+
+                // P2: Store successful output as a pattern in ReasoningBank
+                store_task_as_pattern(
+                    state,
+                    agent_id,
+                    &delegation.role,
+                    &delegation.task,
+                    &output,
+                    duration_ms,
+                ).await;
+
                 results.push(DelegateTaskResponse {
                     success: true,
                     agent_id: agent_id.to_string(),
                     role: delegation.role.clone(),
                     output: Some(output),
                     error: None,
-                    duration_ms: start.elapsed().as_millis() as u64,
+                    duration_ms,
+                    tokens_used,
                 });
             }
             Err(e) => {
@@ -1455,12 +2088,52 @@ async fn execute_delegations(
                     output: None,
                     error: Some(error_msg),
                     duration_ms: start.elapsed().as_millis() as u64,
+                    tokens_used: 0,
                 });
             }
         }
     }
 
     results
+}
+
+/// Find an available (not busy) agent with the specified role
+async fn find_available_agent(state: &DaemonState, role: &str) -> Option<AgentId> {
+    let agents_with_roles = state.acp_server.agents_with_roles().await;
+
+    // Find matching agent that's not busy
+    let found_agent = {
+        let busy_agents = state.busy_agents.read().await;
+        agents_with_roles.into_iter().find(|(agent_id, agent_role)| {
+            if let Some(r) = agent_role {
+                r.to_lowercase() == role.to_lowercase() && !busy_agents.contains_key(agent_id)
+            } else {
+                false
+            }
+        })
+    }; // busy_agents lock released here
+
+    if let Some((agent_id, agent_role)) = found_agent {
+        let role_name = agent_role.unwrap_or_default();
+
+        // FIX 2: Ensure agent is registered in orchestrator for workload tracking
+        let orchestrator = state.orchestrator.read().await;
+        let workloads = orchestrator.get_agent_workloads().await;
+
+        if !workloads.iter().any(|w| w.agent_id == agent_id) {
+            orchestrator.register_agent(
+                agent_id,
+                role_name.clone(),
+                vec![role_name.clone()],
+                5,
+            ).await;
+            info!("Auto-registered {} agent {} in orchestrator for workload tracking", role_name, agent_id);
+        }
+
+        return Some(agent_id);
+    }
+
+    None
 }
 
 async fn get_task(
@@ -1694,9 +2367,27 @@ async fn acp_disconnect(
         }
     };
 
+    // Get the agent's role before disconnecting (for tmux tracking cleanup)
+    let agent_role = state
+        .acp_server
+        .agents_with_roles()
+        .await
+        .into_iter()
+        .find(|(id, _)| *id == agent_id)
+        .and_then(|(_, role)| role);
+
     match state.acp_server.disconnect(agent_id).await {
         Ok(()) => {
             info!("Agent {} disconnected via API", agent_id);
+
+            // If this was a tmux-spawned agent, remove it from tracking
+            if let Some(role) = agent_role {
+                state.tmux_manager.remove_agent_by_role(&role).await;
+            }
+
+            // Also remove from busy agents if it was marked busy
+            state.busy_agents.write().await.remove(&agent_id);
+
             Json(serde_json::json!({
                 "success": true,
                 "message": format!("Agent {} disconnected", agent_id)
@@ -1724,7 +2415,7 @@ async fn acp_send_task(
     State(state): State<DaemonState>,
     Json(request): Json<AcpSendTaskRequest>,
 ) -> Json<serde_json::Value> {
-    // Input validation
+    // Input validation - check task length
     if request.task.len() > MAX_TASK_DESCRIPTION_LEN {
         return Json(serde_json::json!({
             "success": false,
@@ -1734,6 +2425,20 @@ async fn acp_send_task(
                 MAX_TASK_DESCRIPTION_LEN
             )
         }));
+    }
+
+    // SEC-008: Input validation - check context length
+    if let Some(ref ctx) = request.context {
+        if ctx.len() > MAX_TASK_DESCRIPTION_LEN {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": format!(
+                    "Context too long: {} bytes (max: {} bytes)",
+                    ctx.len(),
+                    MAX_TASK_DESCRIPTION_LEN
+                )
+            }));
+        }
     }
 
     let agent_id = match Uuid::parse_str(&request.agent_id) {
@@ -1792,11 +2497,20 @@ async fn pubsub_broadcast(
         }));
     }
 
+    // SEC-009: Sanitize message content before forwarding to agents
+    let sanitized_message = sanitize_broadcast_message(&request.message);
+    if sanitized_message.is_empty() {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "Message is empty after sanitization"
+        }));
+    }
+
     match &state.redis {
         Some(redis) => {
             let msg = PubSubMessage::Broadcast {
                 from: AgentId::new(), // System broadcast
-                message: request.message.clone(),
+                message: sanitized_message,
             };
 
             match redis.pubsub.broadcast(&msg).await {
@@ -1834,6 +2548,15 @@ async fn broadcast_all(
         }));
     }
 
+    // SEC-009: Sanitize message content before forwarding to agents
+    let sanitized_message = sanitize_broadcast_message(&request.message);
+    if sanitized_message.is_empty() {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "Message is empty after sanitization"
+        }));
+    }
+
     let mut acp_count = 0;
     let mut redis_success = false;
 
@@ -1842,13 +2565,16 @@ async fn broadcast_all(
         cca_acp::methods::BROADCAST,
         serde_json::json!({
             "message_type": "announcement",
-            "content": { "message": request.message }
+            "content": { "message": sanitized_message }
         }),
     );
 
     match state.acp_server.broadcast(acp_message).await {
-        Ok(count) => {
-            acp_count = count;
+        Ok(result) => {
+            acp_count = result.sent;
+            if result.had_backpressure() {
+                warn!("Broadcast had backpressure: {}", result);
+            }
         }
         Err(e) => {
             warn!("Failed to broadcast via ACP: {}", e);
@@ -1859,7 +2585,7 @@ async fn broadcast_all(
     if let Some(redis) = &state.redis {
         let msg = PubSubMessage::Broadcast {
             from: AgentId::new(),
-            message: request.message.clone(),
+            message: sanitized_message.clone(),
         };
 
         if redis.pubsub.broadcast(&msg).await.is_ok() {
@@ -1876,30 +2602,41 @@ async fn broadcast_all(
 
 /// Get workload distribution across agents
 async fn get_workloads(State(state): State<DaemonState>) -> Json<serde_json::Value> {
-    let manager = state.agent_manager.read().await;
     let tasks = state.tasks.read().await;
 
-    let agents: Vec<serde_json::Value> = manager
-        .list()
-        .iter()
-        .map(|a| {
-            // Count tasks assigned to this agent (running or in_progress)
-            let current_tasks = tasks
-                .values()
-                .filter(|t| {
-                    t.assigned_agent
-                        .as_ref()
-                        .is_some_and(|id| id == &a.id.to_string())
-                        && (t.status == "running" || t.status == "in_progress")
-                })
-                .count();
+    // Sync ACP-connected agents to orchestrator
+    let orchestrator = state.orchestrator.read().await;
+    let agents_with_roles = state.acp_server.agents_with_roles().await;
+    for (agent_id, role_opt) in agents_with_roles {
+        if let Some(role) = role_opt {
+            let workloads = orchestrator.get_agent_workloads().await;
+            if !workloads.iter().any(|w| w.agent_id == agent_id) {
+                orchestrator.register_agent(
+                    agent_id,
+                    role.clone(),
+                    vec![role.clone()],
+                    5,
+                ).await;
+            }
+        }
+    }
 
+    // Get workloads from orchestrator (includes ACP-connected workers)
+    let orchestrator_workloads = orchestrator.get_agent_workloads().await;
+
+    let agents: Vec<serde_json::Value> = orchestrator_workloads
+        .iter()
+        .map(|w| {
             serde_json::json!({
-                "agent_id": a.id.to_string(),
-                "role": a.role.to_string(),
-                "current_tasks": current_tasks,
-                "max_tasks": 10, // Default max
-                "capabilities": []
+                "agent_id": w.agent_id.to_string(),
+                "role": w.role,
+                "current_tasks": w.current_tasks,
+                "max_tasks": w.max_tasks,
+                "capabilities": w.capabilities,
+                "success_rate": w.success_rate,
+                "avg_completion_time": w.avg_completion_time,
+                "tasks_completed": w.tasks_completed,
+                "tasks_failed": w.tasks_failed
             })
         })
         .collect();
@@ -2149,35 +2886,48 @@ async fn tokens_metrics(State(state): State<DaemonState>) -> Json<serde_json::Va
     let summary = state.token_service.get_efficiency_summary().await;
     let agent_metrics = state.token_service.metrics.get_all_metrics().await;
 
+    // Build agent metrics with field names matching MCP client expectations
     let agents: Vec<serde_json::Value> = agent_metrics
         .iter()
         .map(|(id, m)| {
+            let tokens_used = m.total_input + m.total_output;
+            let efficiency = if tokens_used > 0 {
+                (m.compression_savings as f64 / tokens_used as f64) * 100.0
+            } else {
+                0.0
+            };
             serde_json::json!({
                 "agent_id": id.to_string(),
+                "tokens_used": tokens_used,
+                "tokens_saved": m.compression_savings,
+                "requests": m.message_count,
+                "efficiency": efficiency,
+                // Also include detailed breakdown
                 "total_input": m.total_input,
                 "total_output": m.total_output,
                 "total_context": m.total_context,
-                "message_count": m.message_count,
                 "avg_input_per_message": m.avg_input_per_message,
                 "avg_output_per_message": m.avg_output_per_message,
-                "peak_context_size": m.peak_context_size,
-                "compression_savings": m.compression_savings
+                "peak_context_size": m.peak_context_size
             })
         })
         .collect();
 
+    let efficiency_percent = if summary.total_tokens_used > 0 {
+        (summary.total_tokens_saved as f64 / summary.total_tokens_used as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // Return flat structure matching MCP TokenMetricsResponse
     Json(serde_json::json!({
         "success": true,
-        "summary": {
-            "total_tokens_used": summary.total_tokens_used,
-            "total_tokens_saved": summary.total_tokens_saved,
-            "compression_ratio": format!("{:.1}%", summary.compression_ratio * 100.0),
-            "agents_tracked": summary.agents_tracked,
-            "target_reduction": format!("{:.0}%", summary.target_reduction * 100.0),
-            "current_reduction": format!("{:.1}%", summary.current_reduction * 100.0),
-            "on_track": summary.on_track
-        },
-        "agents": agents
+        "total_tokens_used": summary.total_tokens_used,
+        "total_tokens_saved": summary.total_tokens_saved,
+        "efficiency_percent": efficiency_percent,
+        "agent_count": agent_metrics.len(),
+        "agents": agents,
+        "error": null
     }))
 }
 

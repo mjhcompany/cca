@@ -160,6 +160,102 @@ update_interval_seconds = 300
 | `training_batch_size` | integer | `32` | Batch size |
 | `update_interval_seconds` | integer | `300` | Update interval |
 
+### [agents.permissions] (SEC-007)
+
+Permission configuration controls how Claude Code agents are invoked. This replaces the legacy `--dangerously-skip-permissions` flag with granular, configurable control.
+
+> **See Also:** [Security Hardening Guide](./security-hardening.md) for comprehensive security documentation.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `mode` | string | `"allowlist"` | Permission mode (see below) |
+| `allowed_tools` | array | (see defaults) | Tools allowed without prompting |
+| `denied_tools` | array | (see defaults) | Tools explicitly blocked |
+| `working_dir` | string | `""` | Working directory restriction |
+| `allow_network` | boolean | `false` | Allow network access in Bash |
+| `role_overrides` | object | `{}` | Role-specific permission overrides |
+
+#### Permission Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `allowlist` | **RECOMMENDED**. Uses `--allowedTools` and `--disallowedTools` for granular control | Production, development |
+| `sandbox` | Minimal read-only permissions (Read, Glob, Grep only). Expects external sandboxing | Containers, VMs with external sandbox |
+| `dangerous` | **NOT RECOMMENDED**. Uses `--dangerously-skip-permissions` | Legacy only, fully sandboxed environments |
+
+---
+
+#### CRITICAL SECURITY WARNING: `dangerous` Mode
+
+**DO NOT USE `dangerous` mode in production.** This mode passes `--dangerously-skip-permissions` to Claude Code, which:
+
+- **Disables ALL permission checks** - agents can read/write any file
+- **Allows arbitrary command execution** - agents can run sudo, rm -rf, etc.
+- **Bypasses all safety prompts** - no user confirmation for dangerous operations
+- **Creates severe security risks** - data exfiltration, system compromise, privilege escalation
+
+**Acceptable ONLY when ALL conditions are met:**
+1. Agent runs in a fully isolated container/VM with no host access
+2. Container has no network access or strictly controlled egress
+3. Container has no volume mounts to sensitive host paths
+4. Container runs unprivileged with dropped capabilities
+5. External monitoring detects anomalous behavior
+
+Even then, prefer `allowlist` or `sandbox` mode for defense-in-depth.
+
+---
+
+#### Tool Pattern Syntax
+
+Tools can be specified as:
+- Simple tool name: `"Read"`, `"Glob"`, `"Grep"`
+- Pattern with wildcards: `"Write(src/**)"`, `"Bash(git *)"`, `"Bash(npm test)"`
+
+Pattern examples:
+- `"Write(src/**)"` - Allow writes to any file under src/
+- `"Bash(git *)"` - Allow any git command
+- `"Bash(npm test)"` - Allow only `npm test`
+- `"Read(.env*)"` - Match .env, .env.local, etc.
+
+#### Default Allowed Tools
+
+```
+Read, Glob, Grep
+Write(src/**), Write(tests/**), Write(docs/**)
+Bash(git status), Bash(git diff*), Bash(git log*), Bash(git show*), Bash(git branch*)
+```
+
+#### Default Denied Tools
+
+```
+Bash(rm -rf *), Bash(rm -r *)         # Destructive operations
+Bash(sudo *), Bash(su *)               # Privilege escalation
+Read(.env*), Write(.env*)              # Sensitive files
+Read(*credentials*), Write(*credentials*)
+Read(*secret*), Write(*secret*)
+Bash(chmod 777 *), Bash(chown *)       # System modifications
+```
+
+#### Network Restrictions
+
+When `allow_network = false` (default), these are automatically added to denied tools:
+- `Bash(curl *)`, `Bash(wget *)`, `Bash(nc *)`, `Bash(netcat *)`
+
+#### Role-Specific Overrides
+
+Different agent roles can have different permission levels:
+
+```toml
+[agents.permissions.role_overrides.coordinator]
+mode = "sandbox"
+allowed_tools = ["Read", "Glob", "Grep"]
+
+[agents.permissions.role_overrides.backend]
+mode = "allowlist"
+allowed_tools = ["Read", "Glob", "Grep", "Write(src/**)", "Bash(cargo *)"]
+denied_tools = ["Bash(cargo publish)"]
+```
+
 ## Environment Variables
 
 All configuration options can be set via environment variables using the `CCA__` prefix:
@@ -197,6 +293,13 @@ export CCA__ACP__MAX_RECONNECT_ATTEMPTS="10"
 export CCA__LEARNING__ENABLED="true"
 export CCA__LEARNING__DEFAULT_ALGORITHM="q_learning"
 export CCA__LEARNING__TRAINING_BATCH_SIZE="64"
+
+# Permission settings (SEC-007)
+export CCA__AGENTS__PERMISSIONS__MODE="allowlist"
+export CCA__AGENTS__PERMISSIONS__ALLOWED_TOOLS="Read,Glob,Grep,Write(src/**)"
+export CCA__AGENTS__PERMISSIONS__DENIED_TOOLS="Bash(rm -rf *),Bash(sudo *)"
+export CCA__AGENTS__PERMISSIONS__ALLOW_NETWORK="false"
+export CCA__AGENTS__PERMISSIONS__WORKING_DIR="/path/to/workspace"
 ```
 
 ## Configuration Precedence

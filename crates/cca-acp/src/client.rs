@@ -30,8 +30,6 @@ pub enum ConnectionState {
 /// Pending request awaiting response
 struct PendingRequest {
     sender: oneshot::Sender<AcpMessage>,
-    #[allow(dead_code)] // Preserved for future timeout monitoring
-    created_at: std::time::Instant,
 }
 
 /// Configuration for the ACP client
@@ -362,13 +360,7 @@ impl AcpClient {
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending_requests.write().await;
-            pending.insert(
-                id.clone(),
-                PendingRequest {
-                    sender: tx,
-                    created_at: std::time::Instant::now(),
-                },
-            );
+            pending.insert(id.clone(), PendingRequest { sender: tx });
         }
 
         // Send the request

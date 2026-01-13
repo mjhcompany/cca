@@ -2,13 +2,28 @@
 
 use anyhow::{Context, Result};
 use reqwest::Client;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::path::PathBuf;
 use tracing::{debug, error};
+
+/// Minimal config structure to extract API key from cca.toml
+#[derive(Debug, Deserialize, Default)]
+struct MinimalConfig {
+    #[serde(default)]
+    daemon: MinimalDaemonConfig,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct MinimalDaemonConfig {
+    #[serde(default)]
+    api_keys: Vec<String>,
+}
 
 /// HTTP client for daemon communication
 pub struct DaemonClient {
     client: Client,
     base_url: String,
+    api_key: Option<String>,
 }
 
 impl DaemonClient {
@@ -17,9 +32,68 @@ impl DaemonClient {
         let base_url = base_url.into();
         let base_url = base_url.trim_end_matches('/').to_string();
 
+        // Load API key from config file (same locations as daemon)
+        let api_key = Self::load_api_key_from_config();
+
         Self {
             client: Client::new(),
             base_url,
+            api_key,
+        }
+    }
+
+    /// Load API key from cca.toml config file
+    fn load_api_key_from_config() -> Option<String> {
+        let config_path = Self::find_config_file()?;
+
+        let content = std::fs::read_to_string(&config_path).ok()?;
+        let config: MinimalConfig = toml::from_str(&content).ok()?;
+
+        config.daemon.api_keys.into_iter().next()
+    }
+
+    /// Find the configuration file (same logic as daemon)
+    fn find_config_file() -> Option<PathBuf> {
+        // Check in order: CCA_CONFIG env, system config, user config, current dir
+        if let Ok(path) = std::env::var("CCA_CONFIG") {
+            let path = PathBuf::from(path);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+
+        // System-wide config (installed location)
+        let system_config = PathBuf::from("/usr/local/etc/cca/cca.toml");
+        if system_config.exists() {
+            return Some(system_config);
+        }
+
+        // User config
+        if let Some(home) = dirs::home_dir() {
+            let user_config = home.join(".config").join("cca").join("cca.toml");
+            if user_config.exists() {
+                return Some(user_config);
+            }
+        }
+
+        // Current directory (development)
+        let local = PathBuf::from("cca.toml");
+        if local.exists() {
+            return Some(local);
+        }
+
+        None
+    }
+
+    /// Create a new daemon client with a specific API key
+    pub fn with_api_key(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        let base_url = base_url.into();
+        let base_url = base_url.trim_end_matches('/').to_string();
+
+        Self {
+            client: Client::new(),
+            base_url,
+            api_key: Some(api_key.into()),
         }
     }
 
@@ -28,7 +102,12 @@ impl DaemonClient {
         let url = format!("{}/health", self.base_url);
         debug!("GET {}", url);
 
-        match self.client.get(&url).send().await {
+        let mut request = self.client.get(&url);
+        if let Some(ref api_key) = self.api_key {
+            request = request.header("X-API-Key", api_key);
+        }
+
+        match request.send().await {
             Ok(resp) if resp.status().is_success() => Ok(true),
             Ok(resp) => {
                 error!("Health check failed: {}", resp.status());
@@ -172,12 +251,14 @@ impl DaemonClient {
         let url = format!("{}{}", self.base_url, path);
         debug!("GET {}", url);
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .context("Failed to send request")?;
+        let mut request = self.client.get(&url);
+
+        // Add API key header if configured
+        if let Some(ref api_key) = self.api_key {
+            request = request.header("X-API-Key", api_key);
+        }
+
+        let response = request.send().await.context("Failed to send request")?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -193,13 +274,14 @@ impl DaemonClient {
         let url = format!("{}{}", self.base_url, path);
         debug!("POST {}", url);
 
-        let response = self
-            .client
-            .post(&url)
-            .json(body)
-            .send()
-            .await
-            .context("Failed to send request")?;
+        let mut request = self.client.post(&url).json(body);
+
+        // Add API key header if configured
+        if let Some(ref api_key) = self.api_key {
+            request = request.header("X-API-Key", api_key);
+        }
+
+        let response = request.send().await.context("Failed to send request")?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -212,8 +294,6 @@ impl DaemonClient {
 }
 
 // Response types from daemon
-
-use serde::Deserialize;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
@@ -279,12 +359,18 @@ pub struct AgentActivity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpWorker {
+    pub agent_id: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcpStatusResponse {
     pub running: bool,
     pub port: u16,
     pub connected_agents: usize,
     #[serde(default)]
-    pub agent_ids: Vec<String>,
+    pub workers: Vec<AcpWorker>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

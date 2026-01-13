@@ -320,13 +320,39 @@ volumes:
 
 ### Agent Security
 
-**Warning:** The daemon spawns agents with `--dangerously-skip-permissions`. This bypasses Claude Code's permission prompts.
+CCA uses granular permission control for Claude Code invocations (SEC-007).
 
-**Mitigations:**
-- Run agents in sandboxed containers
+> **See Also:** [Security Hardening Guide](./security-hardening.md) for comprehensive agent permission documentation.
+
+**Permission Modes:**
+- `allowlist` (default, **RECOMMENDED**): Granular control via `--allowedTools` and `--disallowedTools`
+- `sandbox`: Minimal read-only permissions, for use with external sandboxing
+- `dangerous`: **DO NOT USE** - Legacy mode that disables ALL permission checks
+
+**Why Dangerous Mode is Dangerous:**
+
+The `dangerous` mode passes `--dangerously-skip-permissions` to Claude Code, which completely disables all built-in safety features. This allows agents to:
+- Read/write any file (including .env, credentials, secrets)
+- Execute any command (including sudo, rm -rf, etc.)
+- Access network without restrictions
+- Modify system configurations
+
+**Default Security Configuration:**
+```toml
+[agents.permissions]
+mode = "allowlist"
+allowed_tools = ["Read", "Glob", "Grep", "Write(src/**)", "Write(tests/**)", "Bash(git *)"]
+denied_tools = ["Bash(rm -rf *)", "Bash(sudo *)", "Read(.env*)", "Write(.env*)"]
+allow_network = false  # Blocks curl, wget, nc by default
+```
+
+**Additional Mitigations:**
+- Run agents in sandboxed containers (defense-in-depth)
 - Use least-privilege user accounts
-- Monitor agent activity
+- Monitor agent activity via logs
 - Limit agent resource usage
+- Enable authentication (`require_auth = true`)
+- Use role-based permission overrides for least privilege
 
 ### Database Security
 

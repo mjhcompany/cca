@@ -24,7 +24,11 @@ clap.workspace = true
 uuid.workspace = true
 reqwest.workspace = true
 dirs.workspace = true
+toml.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]

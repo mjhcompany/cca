@@ -299,9 +299,15 @@ impl ToolRegistry {
                 }))?),
             }
         } else {
-            // Get overall status
+            // Get overall status, including connected workers from ACP
             match client.status().await {
-                Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
+                Ok(mut response) => {
+                    // Add connected workers count from ACP
+                    if let Ok(acp) = client.get_acp_status().await {
+                        response.agents_count = acp.connected_agents;
+                    }
+                    Ok(serde_json::to_string_pretty(&response)?)
+                }
                 Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
                     "error": format!("Failed to get status: {}", e)
                 }))?),
@@ -331,10 +337,26 @@ impl ToolRegistry {
             }))?);
         }
 
-        match client.list_agents().await {
-            Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
+        // Get ACP-connected workers (WebSocket connections)
+        match client.get_acp_status().await {
+            Ok(acp_status) => {
+                // Transform ACP status into agent list format
+                let agents: Vec<serde_json::Value> = acp_status.workers
+                    .iter()
+                    .map(|w| serde_json::json!({
+                        "agent_id": w.agent_id,
+                        "role": w.role,
+                        "status": "connected"
+                    }))
+                    .collect();
+
+                Ok(serde_json::to_string_pretty(&serde_json::json!({
+                    "agents": agents,
+                    "connected_count": acp_status.connected_agents
+                }))?)
+            }
             Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
-            "error": format!("Failed to list agents: {}", e)
+                "error": format!("Failed to list agents: {}", e)
             }))?),
         }
     }

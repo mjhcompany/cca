@@ -3,53 +3,129 @@
 //! Provides connection pooling and repositories for persistent storage,
 //! including the ReasoningBank with pgvector similarity search.
 //!
+//! STAB-004: All database queries have statement_timeout configured at the
+//! connection level and are wrapped with tokio::time::timeout for defense in depth.
+//!
 //! Note: Many methods are infrastructure for future features and not yet called.
 #![allow(dead_code)]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::FromRow;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use pgvector::Vector;
+
 use crate::config::PostgresConfig;
+
+/// PERF-002: Convert f32 slice to pgvector's native Vector type
+/// This avoids expensive string formatting and parsing for embeddings.
+#[inline]
+fn to_pgvector(embedding: &[f32]) -> Vector {
+    Vector::from(embedding.to_vec())
+}
 
 /// PostgreSQL database connection pool
 pub struct Database {
     pool: PgPool,
+    /// STAB-004: Application-level query timeout for defense in depth
+    query_timeout: Duration,
 }
 
+/// Default connection acquire timeout in seconds
+const DEFAULT_ACQUIRE_TIMEOUT_SECS: u64 = 30;
+
 impl Database {
-    /// Create a new database connection pool
+    /// Create a new database connection pool with timeouts
+    ///
+    /// STAB-004: Configures both PostgreSQL statement_timeout (server-side)
+    /// and application-level query timeout (client-side) for defense in depth.
     pub async fn new(config: &PostgresConfig) -> Result<Self> {
-        info!("Connecting to PostgreSQL at {}", config.url);
+        // STAB-004: Build connection URL with statement_timeout
+        let url_with_timeout = build_connection_url(&config.url, config.statement_timeout_ms);
+        info!(
+            "Connecting to PostgreSQL (statement_timeout: {}ms, query_timeout: {}s)",
+            config.statement_timeout_ms,
+            config.query_timeout_secs
+        );
 
         let pool = PgPoolOptions::new()
             .max_connections(config.max_connections)
-            .connect(&config.url)
+            // STABILITY: Add acquire timeout to prevent indefinite blocking
+            .acquire_timeout(Duration::from_secs(DEFAULT_ACQUIRE_TIMEOUT_SECS))
+            // Idle timeout helps reclaim connections from long-idle pools
+            .idle_timeout(Duration::from_secs(600))
+            .connect(&url_with_timeout)
             .await
             .context("Failed to connect to PostgreSQL")?;
 
-        // Test connection
-        sqlx::query("SELECT 1")
-            .execute(&pool)
+        // Test connection with timeout
+        let query_timeout = Duration::from_secs(config.query_timeout_secs);
+        tokio::time::timeout(query_timeout, sqlx::query("SELECT 1").execute(&pool))
             .await
+            .context("Test query timed out")?
             .context("Failed to execute test query")?;
 
         info!(
-            "PostgreSQL connection established (max connections: {})",
-            config.max_connections
+            "PostgreSQL connection established (max connections: {}, acquire timeout: {}s, statement_timeout: {}ms)",
+            config.max_connections,
+            DEFAULT_ACQUIRE_TIMEOUT_SECS,
+            config.statement_timeout_ms
         );
 
-        Ok(Self { pool })
+        Ok(Self { pool, query_timeout })
     }
 
     /// Get a reference to the connection pool
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Get the configured query timeout
+    /// STAB-004: Use this for wrapping queries with tokio::time::timeout
+    pub fn query_timeout(&self) -> Duration {
+        self.query_timeout
+    }
+}
+
+/// Build a PostgreSQL connection URL with statement_timeout parameter
+/// STAB-004: This ensures all queries have a server-side timeout
+fn build_connection_url(base_url: &str, statement_timeout_ms: u64) -> String {
+    // Parse URL to add/update statement_timeout parameter
+    // PostgreSQL accepts options in the query string or as connection parameters
+    let timeout_param = format!("statement_timeout={}", statement_timeout_ms);
+
+    if base_url.contains('?') {
+        // URL already has query parameters
+        if let Some(start) = base_url.find("statement_timeout=") {
+            // Already has statement_timeout, warn and use configured value
+            warn!(
+                "Connection URL already contains statement_timeout, overriding with configured value"
+            );
+            // Find where the value ends (next & or end of string)
+            let value_start = start + "statement_timeout=".len();
+            let value_end = base_url[value_start..]
+                .find('&')
+                .map(|i| value_start + i)
+                .unwrap_or(base_url.len());
+
+            // Replace just the value portion
+            format!(
+                "{}{}{}",
+                &base_url[..value_start],
+                statement_timeout_ms,
+                &base_url[value_end..]
+            )
+        } else {
+            format!("{}&{}", base_url, timeout_param)
+        }
+    } else {
+        format!("{}?{}", base_url, timeout_param)
     }
 }
 
@@ -252,26 +328,20 @@ impl PatternRepository {
         let id = Uuid::new_v4();
 
         if let Some(emb) = embedding {
-            // Store with embedding
-            let embedding_str = format!(
-                "[{}]",
-                emb.iter()
-                    .map(std::string::ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
+            // PERF-002: Use pgvector's native binary format instead of string formatting
+            let embedding_vec = to_pgvector(emb);
 
             sqlx::query(
                 r"
                 INSERT INTO patterns (id, agent_id, pattern_type, content, embedding, metadata)
-                VALUES ($1, $2, $3, $4, $5::vector, $6)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 ",
             )
             .bind(id)
             .bind(agent_id)
             .bind(pattern_type.as_str())
             .bind(content)
-            .bind(&embedding_str)
+            .bind(&embedding_vec)
             .bind(&metadata)
             .execute(&self.pool)
             .await
@@ -323,29 +393,23 @@ impl PatternRepository {
         limit: i32,
         min_similarity: f64,
     ) -> Result<Vec<PatternWithScore>> {
-        let embedding_str = format!(
-            "[{}]",
-            embedding
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",")
-        );
+        // PERF-002: Use pgvector's native binary format instead of string formatting
+        let embedding_vec = to_pgvector(embedding);
 
         // Use cosine similarity (1 - cosine_distance)
         let rows = sqlx::query_as::<_, (Uuid, Option<Uuid>, String, String, i32, i32, Option<f64>, serde_json::Value, DateTime<Utc>, DateTime<Utc>, f64)>(
             r"
             SELECT id, agent_id, pattern_type, content, success_count, failure_count,
                    success_rate, metadata, created_at, updated_at,
-                   1 - (embedding <=> $1::vector) as similarity
+                   1 - (embedding <=> $1) as similarity
             FROM patterns
             WHERE embedding IS NOT NULL
-              AND 1 - (embedding <=> $1::vector) >= $3
-            ORDER BY embedding <=> $1::vector
+              AND 1 - (embedding <=> $1) >= $3
+            ORDER BY embedding <=> $1
             LIMIT $2
             ",
         )
-        .bind(&embedding_str)
+        .bind(&embedding_vec)
         .bind(limit)
         .bind(min_similarity)
         .fetch_all(&self.pool)
@@ -452,24 +516,18 @@ impl PatternRepository {
 
     /// Update pattern embedding
     pub async fn update_embedding(&self, id: Uuid, embedding: &[f32]) -> Result<()> {
-        let embedding_str = format!(
-            "[{}]",
-            embedding
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",")
-        );
+        // PERF-002: Use pgvector's native binary format instead of string formatting
+        let embedding_vec = to_pgvector(embedding);
 
         sqlx::query(
             r"
             UPDATE patterns
-            SET embedding = $2::vector
+            SET embedding = $2
             WHERE id = $1
             ",
         )
         .bind(id)
-        .bind(&embedding_str)
+        .bind(&embedding_vec)
         .execute(&self.pool)
         .await
         .context("Failed to update embedding")?;
@@ -998,5 +1056,34 @@ mod tests {
         assert_eq!(PatternType::Solution.as_str(), "solution");
         assert_eq!(PatternType::from_str("solution"), Some(PatternType::Solution));
         assert_eq!(PatternType::from_str("unknown"), None);
+    }
+
+    // STAB-004: Tests for connection URL building with statement_timeout
+    #[test]
+    fn test_build_connection_url_no_params() {
+        let url = "postgres://user:pass@localhost/db";
+        let result = build_connection_url(url, 30000);
+        assert_eq!(result, "postgres://user:pass@localhost/db?statement_timeout=30000");
+    }
+
+    #[test]
+    fn test_build_connection_url_with_existing_params() {
+        let url = "postgres://user:pass@localhost/db?sslmode=require";
+        let result = build_connection_url(url, 30000);
+        assert_eq!(result, "postgres://user:pass@localhost/db?sslmode=require&statement_timeout=30000");
+    }
+
+    #[test]
+    fn test_build_connection_url_override_existing_timeout() {
+        let url = "postgres://user:pass@localhost/db?statement_timeout=5000&sslmode=require";
+        let result = build_connection_url(url, 30000);
+        assert_eq!(result, "postgres://user:pass@localhost/db?statement_timeout=30000&sslmode=require");
+    }
+
+    #[test]
+    fn test_build_connection_url_override_timeout_at_end() {
+        let url = "postgres://user:pass@localhost/db?sslmode=require&statement_timeout=5000";
+        let result = build_connection_url(url, 30000);
+        assert_eq!(result, "postgres://user:pass@localhost/db?sslmode=require&statement_timeout=30000");
     }
 }

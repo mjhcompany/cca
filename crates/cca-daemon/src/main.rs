@@ -23,55 +23,12 @@
 #![allow(clippy::map_unwrap_or)]
 #![allow(clippy::float_cmp)]
 
-use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
+use cca_core::util::load_env_file;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-/// Load environment variables from CCA env file if not already set
-fn load_env_file() {
-    let env_paths = [
-        "/usr/local/etc/cca/cca.env".to_string(),
-        dirs::config_dir()
-            .map(|p| p.join("cca/cca.env").to_string_lossy().to_string())
-            .unwrap_or_default(),
-        dirs::home_dir()
-            .map(|p| p.join(".config/cca/cca.env").to_string_lossy().to_string())
-            .unwrap_or_default(),
-    ];
-
-    for path in &env_paths {
-        if path.is_empty() {
-            continue;
-        }
-        if Path::new(path).exists() {
-            if let Ok(contents) = std::fs::read_to_string(path) {
-                parse_env_file(&contents);
-            }
-            break;
-        }
-    }
-}
-
-/// Parse env file contents and set environment variables (only if not already set)
-fn parse_env_file(contents: &str) {
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim();
-            let value = value.trim().trim_matches('"').trim_matches('\'');
-            if std::env::var(key).is_err() {
-                std::env::set_var(key, value);
-            }
-        }
-    }
-}
 
 mod agent_manager;
 mod auth;
@@ -81,6 +38,7 @@ mod orchestrator;
 mod postgres;
 mod redis;
 mod rl;
+mod tmux;
 mod tokens;
 
 use crate::config::Config;
@@ -168,6 +126,29 @@ async fn main() -> Result<()> {
         "Configuration loaded: bind_address={}",
         config.daemon.bind_address
     );
+
+    // Security warnings for authentication configuration
+    // SECURITY: Use is_auth_required() which enforces auth in production builds
+    if !config.daemon.is_auth_required() {
+        warn!("============================================================");
+        warn!("WARNING: API authentication is DISABLED!");
+        warn!("Anyone can access the CCA API without credentials.");
+        warn!("This is only possible in dev builds (--features dev).");
+        warn!("Production builds ALWAYS require authentication.");
+        warn!("============================================================");
+    } else if config.daemon.api_keys.is_empty() {
+        error!("============================================================");
+        error!("ERROR: Authentication is enabled but no API keys configured!");
+        error!("All API requests will be rejected.");
+        error!("Set CCA__DAEMON__API_KEYS=your-secret-key");
+        error!("Or disable auth with CCA__DAEMON__REQUIRE_AUTH=false (dev only)");
+        error!("============================================================");
+    } else {
+        info!(
+            "API authentication: enabled ({} API key(s) configured)",
+            config.daemon.api_keys.len()
+        );
+    }
 
     // Create and start daemon
     let daemon = Arc::new(CCADaemon::new(config).await?);

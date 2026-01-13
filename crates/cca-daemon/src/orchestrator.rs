@@ -663,9 +663,12 @@ impl Orchestrator {
                 AcpMessage::notification(methods::BROADCAST, serde_json::to_value(&params)?);
 
             match acp.broadcast(message).await {
-                Ok(count) => {
-                    sent_count += count;
-                    debug!("Broadcast sent to {} agents via ACP", count);
+                Ok(result) => {
+                    sent_count += result.sent;
+                    debug!("Broadcast sent to {} agents via ACP ({})", result.sent, result);
+                    if result.had_backpressure() {
+                        warn!("Broadcast had backpressure: {}", result);
+                    }
                 }
                 Err(e) => {
                     error!("Failed to broadcast via ACP: {}", e);

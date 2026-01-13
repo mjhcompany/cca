@@ -156,7 +156,7 @@ async fn show_status() -> Result<()> {
     println!("Daemon: checking...");
 
     // Try to connect to daemon
-    match reqwest::get(format!("{}/api/v1/health", daemon_url())).await {
+    match commands::http::get(&format!("{}/api/v1/health", daemon_url())).await {
         Ok(resp) if resp.status().is_success() => {
             println!("Daemon: running");
         }

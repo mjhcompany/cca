@@ -222,4 +222,13 @@ impl AcpError {
             data: None,
         }
     }
+
+    /// Create a custom error with specific code and message
+    pub fn custom(code: i32, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data: None,
+        }
+    }
 }

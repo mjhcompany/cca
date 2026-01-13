@@ -16,6 +16,7 @@ pub mod error;
 pub mod memory;
 pub mod task;
 pub mod types;
+pub mod util;
 
 pub use agent::{Agent, AgentId, AgentRole, AgentState};
 pub use error::{CCAError, Result};

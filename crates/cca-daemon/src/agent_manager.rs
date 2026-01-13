@@ -20,8 +20,107 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use cca_core::{Agent, AgentId, AgentRole, AgentState};
+use cca_core::util::{safe_truncate, safe_truncate_with_ellipsis};
 
-use crate::config::Config;
+use crate::config::{Config, PermissionsConfig};
+
+/// SEC-007: Apply permission configuration to a tokio Command
+/// This replaces the blanket --dangerously-skip-permissions with granular control
+pub fn apply_permissions_to_command(cmd: &mut Command, permissions: &PermissionsConfig, role: &str) {
+    let mode = permissions.get_mode(role);
+
+    match mode {
+        "dangerous" => {
+            // Legacy mode - NOT RECOMMENDED
+            // Only use this in fully sandboxed environments (containers/VMs)
+            warn!(
+                "SEC-007: Using dangerous permission mode for role '{}'. \
+                 This bypasses all permission checks. Ensure environment is sandboxed.",
+                role
+            );
+            cmd.arg("--dangerously-skip-permissions");
+        }
+        "sandbox" => {
+            // Sandbox mode - expects external sandboxing, uses minimal permissions
+            info!(
+                "SEC-007: Using sandbox permission mode for role '{}'. \
+                 External sandboxing (container/VM) is expected.",
+                role
+            );
+            // In sandbox mode, we still use allowlist but with minimal tools
+            // This provides defense-in-depth even when sandboxed
+            cmd.arg("--allowedTools");
+            cmd.arg("Read,Glob,Grep");  // Minimal read-only access
+
+            // Apply denials
+            let denied = permissions.get_denied_tools(role);
+            if !denied.is_empty() {
+                cmd.arg("--disallowedTools");
+                cmd.arg(denied.join(","));
+            }
+        }
+        "allowlist" | _ => {
+            // Allowlist mode - secure default
+            // Uses --allowedTools to specify exactly what's permitted
+            let allowed = permissions.get_allowed_tools(role);
+            let denied = permissions.get_denied_tools(role);
+
+            info!(
+                "SEC-007: Using allowlist permission mode for role '{}'. \
+                 Allowed: {} tools, Denied: {} patterns.",
+                role,
+                allowed.len(),
+                denied.len()
+            );
+
+            if !allowed.is_empty() {
+                cmd.arg("--allowedTools");
+                cmd.arg(allowed.join(","));
+            }
+
+            if !denied.is_empty() {
+                cmd.arg("--disallowedTools");
+                cmd.arg(denied.join(","));
+            }
+        }
+    }
+}
+
+/// SEC-007: Apply permission configuration to a portable_pty CommandBuilder
+/// This is the PTY variant for interactive sessions
+pub fn apply_permissions_to_pty_command(cmd: &mut CommandBuilder, permissions: &PermissionsConfig, role: &str) {
+    let mode = permissions.get_mode(role);
+
+    match mode {
+        "dangerous" => {
+            cmd.arg("--dangerously-skip-permissions");
+        }
+        "sandbox" => {
+            cmd.arg("--allowedTools");
+            cmd.arg("Read,Glob,Grep");
+
+            let denied = permissions.get_denied_tools(role);
+            if !denied.is_empty() {
+                cmd.arg("--disallowedTools");
+                cmd.arg(denied.join(","));
+            }
+        }
+        "allowlist" | _ => {
+            let allowed = permissions.get_allowed_tools(role);
+            let denied = permissions.get_denied_tools(role);
+
+            if !allowed.is_empty() {
+                cmd.arg("--allowedTools");
+                cmd.arg(allowed.join(","));
+            }
+
+            if !denied.is_empty() {
+                cmd.arg("--disallowedTools");
+                cmd.arg(denied.join(","));
+            }
+        }
+    }
+}
 
 /// Manages Claude Code agent instances
 pub struct AgentManager {
@@ -146,12 +245,10 @@ impl AgentManager {
         // Build command for Claude Code (interactive mode)
         let mut cmd = CommandBuilder::new(claude_path);
 
-        warn!(
-            "Agent {} interactive session with --dangerously-skip-permissions. \
-             Ensure environment is properly sandboxed.",
-            agent_id
-        );
-        cmd.arg("--dangerously-skip-permissions");
+        // SEC-007: Apply permission configuration instead of blanket --dangerously-skip-permissions
+        let role_str = role.to_string();
+        apply_permissions_to_pty_command(&mut cmd, &self.config.agents.permissions, &role_str);
+
         cmd.env("CLAUDE_MD", &claude_md_path);
         cmd.env("TERM", "dumb");
         cmd.env("NO_COLOR", "1");
@@ -357,11 +454,7 @@ impl AgentManager {
             .to_string_lossy().to_string();
 
         // Set current task
-        let task_preview = if message.len() > 100 {
-            format!("{}...", &message[..100])
-        } else {
-            message.to_string()
-        };
+        let task_preview = safe_truncate_with_ellipsis(message, 100);
         managed.current_task = Some(task_preview.clone());
 
         // Add log entry for task start
@@ -408,11 +501,7 @@ impl AgentManager {
 
             // Add output preview for successful tasks
             if success {
-                let output_preview = if output.len() > 200 {
-                    format!("{}...", &output[..200])
-                } else {
-                    output.to_string()
-                };
+                let output_preview = safe_truncate_with_ellipsis(output, 200);
                 let debug_entry = LogEntry {
                     timestamp: Utc::now(),
                     level: "DEBUG".to_string(),
@@ -438,24 +527,19 @@ impl AgentManager {
             "Sending task to {} agent {}: {}",
             config.role,
             agent_id,
-            if message.len() > 100 {
-                &message[..100]
-            } else {
-                message
-            }
+            safe_truncate(message, 100)
         );
 
-        // SECURITY WARNING: This flag bypasses Claude Code permission prompts.
-        warn!(
-            "Agent {} running with --dangerously-skip-permissions. \
-             Ensure environment is properly sandboxed.",
-            agent_id
-        );
+        // SEC-007: Build Claude Code command with proper permission configuration
+        let mut cmd = Command::new(&config.claude_path);
 
-        // Build the Claude Code command in print mode
-        let output = Command::new(&config.claude_path)
-            .arg("--dangerously-skip-permissions")
-            .arg("--print") // Non-interactive mode
+        // Apply permission configuration (replaces blanket --dangerously-skip-permissions)
+        let role_str = config.role.to_string();
+        apply_permissions_to_command(&mut cmd, &self.config.agents.permissions, &role_str);
+
+        // Non-interactive mode
+        let output = cmd
+            .arg("--print")
             .arg("--output-format")
             .arg("text")
             .arg(message) // The prompt/task

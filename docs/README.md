@@ -34,6 +34,7 @@ CCA enables orchestration of multiple Claude Code instances through a single **C
 - [**API Reference**](./api-reference.md) - HTTP API and MCP tool documentation
 - [**Deployment Guide**](./deployment.md) - Setup and deployment instructions
 - [**Configuration**](./configuration.md) - Configuration options and environment variables
+- [**Security Hardening**](./security-hardening.md) - Security best practices and permission controls
 
 ## Quick Start
 

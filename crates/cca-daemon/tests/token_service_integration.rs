@@ -103,6 +103,8 @@ fn main() {
         }
 
         // Remove inline comments
+        // Safety: find("//") returns byte position of ASCII pattern "//"
+        // which is always a valid UTF-8 boundary for slicing
         let line_without_inline = if let Some(pos) = line.find("//") {
             &line[..pos]
         } else {
@@ -287,7 +289,6 @@ async fn test_metrics_tracking() {
 #[tokio::test]
 async fn test_recommendations_generation() {
     #[derive(Debug)]
-    #[allow(dead_code)]
     struct Recommendation {
         category: String,
         message: String,
@@ -331,7 +332,9 @@ async fn test_recommendations_generation() {
     // Test with low efficiency and no features enabled
     let recs = generate_recommendations(15.0, false, false);
     assert_eq!(recs.len(), 3);
-    assert!(recs.iter().any(|r| r.priority == "high"));
+    assert!(recs.iter().any(|r| r.priority == "high" && r.category == "efficiency"));
+    assert!(recs.iter().any(|r| r.category == "compression" && r.message.contains("Enable compression")));
+    assert!(recs.iter().any(|r| r.category == "history"));
 
     // Test with good efficiency and all features enabled
     let recs = generate_recommendations(35.0, true, true);
