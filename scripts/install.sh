@@ -358,6 +358,12 @@ enabled = true
 default_algorithm = "ppo"
 training_batch_size = 32
 update_interval_seconds = 300
+
+[embeddings]
+enabled = ${EMBEDDINGS_ENABLED:-false}
+ollama_url = "${EMBEDDINGS_OLLAMA_URL:-http://localhost:11434}"
+model = "${EMBEDDINGS_MODEL:-nomic-embed-text:latest}"
+dimension = ${EMBEDDINGS_DIMENSION:-768}
 EOF
 
 echo -e "  ${GREEN}+${NC} cca.toml"

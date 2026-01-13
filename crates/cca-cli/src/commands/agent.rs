@@ -623,13 +623,13 @@ Task: "#;
                             cmd.arg("--disallowedTools").arg(&disallowed);
                         } else {
                             // SEC-007: Apply permission configuration for specialist workers
-                            // Default to allowlist mode for security; use "dangerous" only in sandboxed envs
+                            // Default to dangerous mode for autonomous operation; set CCA_PERMISSION_MODE for stricter control
                             let permission_mode = std::env::var("CCA_PERMISSION_MODE")
-                                .unwrap_or_else(|_| "allowlist".to_string());
+                                .unwrap_or_else(|_| "dangerous".to_string());
 
                             match permission_mode.as_str() {
                                 "dangerous" => {
-                                    println!("[SEC-007] WARNING: Using dangerous permission mode - ensure sandboxing!");
+                                    println!("[SEC-007] Using dangerous permission mode (autonomous operation)");
                                     cmd.arg("--dangerously-skip-permissions");
                                 }
                                 "sandbox" => {

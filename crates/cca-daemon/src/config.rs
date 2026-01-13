@@ -17,6 +17,8 @@ pub struct Config {
     pub acp: AcpConfig,
     pub mcp: McpConfig,
     pub learning: LearningConfig,
+    pub embeddings: EmbeddingsConfig,
+    pub indexing: IndexingConfig,
 }
 
 /// Configuration for an API key with role permissions
@@ -544,6 +546,81 @@ impl Default for LearningConfig {
     }
 }
 
+/// Configuration for embedding service (semantic search via Ollama)
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct EmbeddingsConfig {
+    /// Whether embeddings are enabled
+    pub enabled: bool,
+    /// Ollama API base URL (e.g., "http://192.168.33.218:11434")
+    pub ollama_url: String,
+    /// Model name for embeddings (e.g., "nomic-embed-text:latest")
+    pub model: String,
+    /// Expected embedding dimension (768 for nomic-embed-text)
+    pub dimension: usize,
+}
+
+impl Default for EmbeddingsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false, // Disabled by default until configured
+            ollama_url: "http://localhost:11434".to_string(),
+            model: "nomic-embed-text:latest".to_string(),
+            dimension: 768,
+        }
+    }
+}
+
+/// Configuration for codebase indexing
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct IndexingConfig {
+    /// Enable code indexing features
+    pub enabled: bool,
+    /// Default batch size for embedding generation
+    pub batch_size: usize,
+    /// Maximum chunk size in characters
+    pub max_chunk_size: usize,
+    /// Default file extensions to index
+    #[serde(default, deserialize_with = "deserialize_tool_list")]
+    pub default_extensions: Vec<String>,
+    /// Default exclude patterns (glob format)
+    #[serde(default, deserialize_with = "deserialize_tool_list")]
+    pub default_excludes: Vec<String>,
+}
+
+impl Default for IndexingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            batch_size: 10,
+            max_chunk_size: 4000,
+            default_extensions: vec![
+                "rs".to_string(),
+                "py".to_string(),
+                "js".to_string(),
+                "ts".to_string(),
+                "jsx".to_string(),
+                "tsx".to_string(),
+                "go".to_string(),
+                "java".to_string(),
+                "c".to_string(),
+                "cpp".to_string(),
+                "h".to_string(),
+                "hpp".to_string(),
+            ],
+            default_excludes: vec![
+                "**/node_modules/**".to_string(),
+                "**/target/**".to_string(),
+                "**/.git/**".to_string(),
+                "**/vendor/**".to_string(),
+                "**/__pycache__/**".to_string(),
+                "**/dist/**".to_string(),
+                "**/build/**".to_string(),
+            ],
+        }
+    }
+}
 
 impl Config {
     /// Load configuration from file and environment

@@ -46,9 +46,24 @@ tower-http.workspace = true
 prometheus.workspace = true
 dirs.workspace = true
 governor = "0.6"
+reqwest = { workspace = true }
+
+# Code parsing with tree-sitter
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-c = "0.23"
+tree-sitter-cpp = "0.23"
+
+# Directory traversal and pattern matching
+walkdir = "2.5"
+glob = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
-reqwest = { workspace = true }
 tempfile = "3.14"
 axum-test = "16"

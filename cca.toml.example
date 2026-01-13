@@ -182,6 +182,22 @@ training_batch_size = 32
 # Update interval in seconds
 update_interval_seconds = 300
 
+[embeddings]
+# Enable semantic search with embeddings via Ollama
+# When enabled, patterns are stored with embeddings and memory search uses semantic similarity
+enabled = false
+
+# Ollama API URL - set this to your Ollama server
+ollama_url = "http://localhost:11434"
+
+# Embedding model to use (nomic-embed-text is recommended for quality/performance balance)
+# Other options: mxbai-embed-large (better quality, slower), all-minilm (faster, lower quality)
+model = "nomic-embed-text:latest"
+
+# Embedding dimension (768 for nomic-embed-text, 1024 for mxbai-embed-large)
+# This must match the model's output dimension
+dimension = 768
+
 [token_efficiency]
 # Enable token efficiency optimization
 enabled = true

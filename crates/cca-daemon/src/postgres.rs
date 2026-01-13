@@ -575,6 +575,26 @@ impl PatternRepository {
 
         Ok(count.0)
     }
+
+    /// Get patterns without embeddings (for backfilling)
+    pub async fn get_without_embeddings(&self, limit: i32) -> Result<Vec<PatternRecord>> {
+        let patterns = sqlx::query_as::<_, PatternRecord>(
+            r"
+            SELECT id, agent_id, pattern_type, content, success_count, failure_count,
+                   success_rate, metadata, created_at, updated_at
+            FROM patterns
+            WHERE embedding IS NULL
+            ORDER BY created_at DESC
+            LIMIT $1
+            ",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to get patterns without embeddings")?;
+
+        Ok(patterns)
+    }
 }
 
 // ============================================================================
@@ -1011,6 +1031,420 @@ impl RLExperienceRepository {
 }
 
 // ============================================================================
+// Code Chunk Repository (Codebase Indexing)
+// ============================================================================
+
+/// Code chunk record from the database
+#[derive(Debug, Clone, FromRow)]
+pub struct CodeChunkRecord {
+    pub id: Uuid,
+    pub file_path: String,
+    pub chunk_type: String,
+    pub name: String,
+    pub signature: Option<String>,
+    pub content: String,
+    pub start_line: i32,
+    pub end_line: i32,
+    pub language: String,
+    pub metadata: serde_json::Value,
+    pub indexed_at: DateTime<Utc>,
+}
+
+/// Code chunk with similarity score from vector search
+#[derive(Debug, Clone)]
+pub struct CodeChunkWithScore {
+    pub chunk: CodeChunkRecord,
+    pub similarity: f64,
+}
+
+/// Repository for indexed code chunks
+pub struct CodeChunkRepository {
+    pool: PgPool,
+}
+
+impl CodeChunkRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// Insert or update a code chunk with embedding
+    pub async fn upsert(
+        &self,
+        file_path: &str,
+        chunk_type: &str,
+        name: &str,
+        signature: Option<&str>,
+        content: &str,
+        start_line: i32,
+        end_line: i32,
+        language: &str,
+        embedding: &[f32],
+        metadata: serde_json::Value,
+    ) -> Result<Uuid> {
+        let id = Uuid::new_v4();
+        let embedding_vec = to_pgvector(embedding);
+
+        sqlx::query(
+            r"
+            INSERT INTO code_chunks (id, file_path, chunk_type, name, signature, content,
+                                     start_line, end_line, language, embedding, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (file_path, chunk_type, name, start_line)
+            DO UPDATE SET
+                signature = EXCLUDED.signature,
+                content = EXCLUDED.content,
+                end_line = EXCLUDED.end_line,
+                embedding = EXCLUDED.embedding,
+                metadata = EXCLUDED.metadata,
+                indexed_at = NOW()
+            ",
+        )
+        .bind(id)
+        .bind(file_path)
+        .bind(chunk_type)
+        .bind(name)
+        .bind(signature)
+        .bind(content)
+        .bind(start_line)
+        .bind(end_line)
+        .bind(language)
+        .bind(&embedding_vec)
+        .bind(&metadata)
+        .execute(&self.pool)
+        .await
+        .context("Failed to upsert code chunk")?;
+
+        debug!("Upserted code chunk {} in {}", name, file_path);
+        Ok(id)
+    }
+
+    /// Search code chunks by vector similarity
+    pub async fn search_similar(
+        &self,
+        embedding: &[f32],
+        limit: i32,
+        min_similarity: f64,
+        language: Option<&str>,
+    ) -> Result<Vec<CodeChunkWithScore>> {
+        let embedding_vec = to_pgvector(embedding);
+
+        let rows = if let Some(lang) = language {
+            sqlx::query_as::<_, (Uuid, String, String, String, Option<String>, String, i32, i32, String, serde_json::Value, DateTime<Utc>, f64)>(
+                r"
+                SELECT id, file_path, chunk_type, name, signature, content,
+                       start_line, end_line, language, metadata, indexed_at,
+                       1 - (embedding <=> $1) as similarity
+                FROM code_chunks
+                WHERE embedding IS NOT NULL
+                  AND language = $4
+                  AND 1 - (embedding <=> $1) >= $3
+                ORDER BY embedding <=> $1
+                LIMIT $2
+                ",
+            )
+            .bind(&embedding_vec)
+            .bind(limit)
+            .bind(min_similarity)
+            .bind(lang)
+            .fetch_all(&self.pool)
+            .await
+        } else {
+            sqlx::query_as::<_, (Uuid, String, String, String, Option<String>, String, i32, i32, String, serde_json::Value, DateTime<Utc>, f64)>(
+                r"
+                SELECT id, file_path, chunk_type, name, signature, content,
+                       start_line, end_line, language, metadata, indexed_at,
+                       1 - (embedding <=> $1) as similarity
+                FROM code_chunks
+                WHERE embedding IS NOT NULL
+                  AND 1 - (embedding <=> $1) >= $3
+                ORDER BY embedding <=> $1
+                LIMIT $2
+                ",
+            )
+            .bind(&embedding_vec)
+            .bind(limit)
+            .bind(min_similarity)
+            .fetch_all(&self.pool)
+            .await
+        }
+        .context("Failed to search similar code chunks")?;
+
+        let chunks = rows
+            .into_iter()
+            .map(|row| CodeChunkWithScore {
+                chunk: CodeChunkRecord {
+                    id: row.0,
+                    file_path: row.1,
+                    chunk_type: row.2,
+                    name: row.3,
+                    signature: row.4,
+                    content: row.5,
+                    start_line: row.6,
+                    end_line: row.7,
+                    language: row.8,
+                    metadata: row.9,
+                    indexed_at: row.10,
+                },
+                similarity: row.11,
+            })
+            .collect();
+
+        Ok(chunks)
+    }
+
+    /// Delete all chunks for a file (for re-indexing)
+    pub async fn delete_by_file(&self, file_path: &str) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM code_chunks WHERE file_path = $1")
+            .bind(file_path)
+            .execute(&self.pool)
+            .await
+            .context("Failed to delete code chunks by file")?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Get all chunks for a file
+    pub async fn get_by_file(&self, file_path: &str) -> Result<Vec<CodeChunkRecord>> {
+        let chunks = sqlx::query_as::<_, CodeChunkRecord>(
+            r"
+            SELECT id, file_path, chunk_type, name, signature, content,
+                   start_line, end_line, language, metadata, indexed_at
+            FROM code_chunks
+            WHERE file_path = $1
+            ORDER BY start_line
+            ",
+        )
+        .bind(file_path)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to get code chunks by file")?;
+
+        Ok(chunks)
+    }
+
+    /// Count total code chunks
+    pub async fn count(&self) -> Result<i64> {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM code_chunks")
+            .fetch_one(&self.pool)
+            .await
+            .context("Failed to count code chunks")?;
+
+        Ok(count.0)
+    }
+
+    /// Count chunks by language
+    pub async fn count_by_language(&self) -> Result<Vec<(String, i64)>> {
+        let counts = sqlx::query_as::<_, (String, i64)>(
+            r"
+            SELECT language, COUNT(*) as count
+            FROM code_chunks
+            GROUP BY language
+            ORDER BY count DESC
+            ",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to count by language")?;
+
+        Ok(counts)
+    }
+
+    /// Get indexing statistics
+    pub async fn get_stats(&self) -> Result<CodeIndexStats> {
+        let stats = sqlx::query_as::<_, CodeIndexStats>(
+            r"
+            SELECT
+                COUNT(*) as total_chunks,
+                COUNT(DISTINCT file_path) as total_files,
+                COUNT(DISTINCT language) as languages_count
+            FROM code_chunks
+            ",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to get code index stats")?;
+
+        Ok(stats)
+    }
+}
+
+/// Code indexing statistics
+#[derive(Debug, Clone, FromRow)]
+pub struct CodeIndexStats {
+    pub total_chunks: i64,
+    pub total_files: i64,
+    pub languages_count: i64,
+}
+
+// ============================================================================
+// Indexing Job Repository
+// ============================================================================
+
+/// Indexing job record from the database
+#[derive(Debug, Clone, FromRow)]
+pub struct IndexingJobRecord {
+    pub id: Uuid,
+    pub path: String,
+    pub status: String,
+    pub total_files: i32,
+    pub processed_files: i32,
+    pub total_chunks: i32,
+    pub indexed_chunks: i32,
+    pub errors: serde_json::Value,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Repository for indexing job tracking
+pub struct IndexingJobRepository {
+    pool: PgPool,
+}
+
+impl IndexingJobRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// Create a new indexing job
+    pub async fn create(&self, path: &str) -> Result<Uuid> {
+        let id = Uuid::new_v4();
+
+        sqlx::query(
+            r"
+            INSERT INTO indexing_jobs (id, path, status, started_at)
+            VALUES ($1, $2, 'running', NOW())
+            ",
+        )
+        .bind(id)
+        .bind(path)
+        .execute(&self.pool)
+        .await
+        .context("Failed to create indexing job")?;
+
+        debug!("Created indexing job {} for path {}", id, path);
+        Ok(id)
+    }
+
+    /// Update job progress
+    pub async fn update_progress(
+        &self,
+        id: Uuid,
+        total_files: i32,
+        processed_files: i32,
+        total_chunks: i32,
+        indexed_chunks: i32,
+    ) -> Result<()> {
+        sqlx::query(
+            r"
+            UPDATE indexing_jobs
+            SET total_files = $2, processed_files = $3,
+                total_chunks = $4, indexed_chunks = $5
+            WHERE id = $1
+            ",
+        )
+        .bind(id)
+        .bind(total_files)
+        .bind(processed_files)
+        .bind(total_chunks)
+        .bind(indexed_chunks)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update indexing job progress")?;
+
+        Ok(())
+    }
+
+    /// Complete a job (success or failure)
+    pub async fn complete(&self, id: Uuid, success: bool, errors: Vec<String>) -> Result<()> {
+        let status = if success { "completed" } else { "failed" };
+
+        sqlx::query(
+            r"
+            UPDATE indexing_jobs
+            SET status = $2, errors = $3, completed_at = NOW()
+            WHERE id = $1
+            ",
+        )
+        .bind(id)
+        .bind(status)
+        .bind(serde_json::json!(errors))
+        .execute(&self.pool)
+        .await
+        .context("Failed to complete indexing job")?;
+
+        Ok(())
+    }
+
+    /// Cancel a running job
+    pub async fn cancel(&self, id: Uuid) -> Result<bool> {
+        let result = sqlx::query(
+            r"
+            UPDATE indexing_jobs
+            SET status = 'cancelled', completed_at = NOW()
+            WHERE id = $1 AND status = 'running'
+            ",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to cancel indexing job")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Get a job by ID
+    pub async fn get(&self, id: Uuid) -> Result<Option<IndexingJobRecord>> {
+        let job = sqlx::query_as::<_, IndexingJobRecord>(
+            r"
+            SELECT id, path, status, total_files, processed_files,
+                   total_chunks, indexed_chunks, errors, started_at, completed_at, created_at
+            FROM indexing_jobs
+            WHERE id = $1
+            ",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to get indexing job")?;
+
+        Ok(job)
+    }
+
+    /// List recent jobs
+    pub async fn list_recent(&self, limit: i32) -> Result<Vec<IndexingJobRecord>> {
+        let jobs = sqlx::query_as::<_, IndexingJobRecord>(
+            r"
+            SELECT id, path, status, total_files, processed_files,
+                   total_chunks, indexed_chunks, errors, started_at, completed_at, created_at
+            FROM indexing_jobs
+            ORDER BY created_at DESC
+            LIMIT $1
+            ",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to list indexing jobs")?;
+
+        Ok(jobs)
+    }
+
+    /// Check if a job is still running
+    pub async fn is_running(&self, id: Uuid) -> Result<bool> {
+        let status: Option<(String,)> = sqlx::query_as(
+            "SELECT status FROM indexing_jobs WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to check job status")?;
+
+        Ok(status.map(|(s,)| s == "running").unwrap_or(false))
+    }
+}
+
+// ============================================================================
 // Combined Database Services
 // ============================================================================
 
@@ -1022,6 +1456,8 @@ pub struct PostgresServices {
     pub tasks: TaskRepository,
     pub snapshots: ContextSnapshotRepository,
     pub experiences: RLExperienceRepository,
+    pub code_chunks: CodeChunkRepository,
+    pub indexing_jobs: IndexingJobRepository,
 }
 
 impl PostgresServices {
@@ -1034,7 +1470,9 @@ impl PostgresServices {
         let patterns = PatternRepository::new(pool.clone());
         let tasks = TaskRepository::new(pool.clone());
         let snapshots = ContextSnapshotRepository::new(pool.clone());
-        let experiences = RLExperienceRepository::new(pool);
+        let experiences = RLExperienceRepository::new(pool.clone());
+        let code_chunks = CodeChunkRepository::new(pool.clone());
+        let indexing_jobs = IndexingJobRepository::new(pool);
 
         Ok(Self {
             db,
@@ -1043,6 +1481,8 @@ impl PostgresServices {
             tasks,
             snapshots,
             experiences,
+            code_chunks,
+            indexing_jobs,
         })
     }
 }

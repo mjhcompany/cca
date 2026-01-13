@@ -246,6 +246,49 @@ impl DaemonClient {
         self.get("/api/v1/tokens/recommendations").await
     }
 
+    /// Start codebase indexing
+    pub async fn start_indexing(
+        &self,
+        path: &str,
+        extensions: Option<Vec<String>>,
+        exclude_patterns: Option<Vec<String>>,
+        batch_size: Option<usize>,
+    ) -> Result<IndexingJobResponse> {
+        self.post(
+            "/api/v1/memory/index",
+            &serde_json::json!({
+                "path": path,
+                "extensions": extensions,
+                "exclude_patterns": exclude_patterns,
+                "batch_size": batch_size.unwrap_or(10)
+            }),
+        )
+        .await
+    }
+
+    /// Get indexing job status
+    pub async fn get_indexing_status(&self, job_id: &str) -> Result<IndexingJobStatus> {
+        self.get(&format!("/api/v1/memory/index/{job_id}")).await
+    }
+
+    /// Search indexed code
+    pub async fn search_code(
+        &self,
+        query: &str,
+        limit: Option<i32>,
+        language: Option<&str>,
+    ) -> Result<CodeSearchResponse> {
+        self.post(
+            "/api/v1/code/search",
+            &serde_json::json!({
+                "query": query,
+                "limit": limit.unwrap_or(10),
+                "language": language
+            }),
+        )
+        .await
+    }
+
     /// Generic GET request
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
@@ -570,4 +613,63 @@ pub struct TokenRecommendation {
     pub priority: String,
     #[serde(default)]
     pub potential_savings: Option<String>,
+}
+
+// Codebase indexing response types
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexingJobResponse {
+    pub job_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexingJobStatus {
+    pub job_id: String,
+    pub path: String,
+    pub status: String,
+    #[serde(default)]
+    pub total_files: i32,
+    #[serde(default)]
+    pub processed_files: i32,
+    #[serde(default)]
+    pub total_chunks: i32,
+    #[serde(default)]
+    pub indexed_chunks: i32,
+    #[serde(default)]
+    pub errors: Vec<String>,
+    #[serde(default)]
+    pub progress_percent: f32,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeSearchResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub results: Vec<CodeSearchResult>,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeSearchResult {
+    pub id: String,
+    pub file_path: String,
+    pub chunk_type: String,
+    pub name: String,
+    #[serde(default)]
+    pub signature: Option<String>,
+    pub content: String,
+    pub start_line: i32,
+    pub end_line: i32,
+    pub language: String,
+    pub similarity: f64,
 }

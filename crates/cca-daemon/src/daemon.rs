@@ -39,6 +39,8 @@ use crate::postgres::PostgresServices;
 use crate::redis::{PubSubMessage, RedisAgentState, RedisServices};
 use crate::rl::{RLConfig, RLService};
 use crate::tokens::TokenService;
+use crate::embeddings::{EmbeddingConfig, EmbeddingService};
+use crate::indexing::{IndexingService, StartIndexingRequest};
 
 /// Shared daemon state for API handlers
 #[derive(Clone)]
@@ -57,6 +59,10 @@ pub struct DaemonState {
     pub busy_agents: Arc<RwLock<HashMap<AgentId, String>>>,
     /// Cached health check result - PERF-003
     health_cache: Arc<RwLock<Option<CachedHealthCheck>>>,
+    /// Embedding service for semantic search (optional, requires Ollama)
+    pub embedding_service: Option<Arc<EmbeddingService>>,
+    /// Indexing service for codebase indexing (optional, requires embeddings + postgres)
+    pub indexing_service: Option<Arc<IndexingService>>,
 }
 
 /// Task tracking state
@@ -175,6 +181,47 @@ impl CCADaemon {
             info!("Tmux auto-spawn enabled (max {} agents)", crate::tmux::MAX_AUTO_AGENTS);
         }
 
+        // Initialize Embedding service for semantic search (optional)
+        let embedding_service = if config.embeddings.enabled {
+            let emb_config = EmbeddingConfig {
+                ollama_url: config.embeddings.ollama_url.clone(),
+                model: config.embeddings.model.clone(),
+                dimension: config.embeddings.dimension,
+            };
+            let service = EmbeddingService::new(emb_config);
+            info!(
+                "Embedding service enabled: {} ({}d)",
+                config.embeddings.model, config.embeddings.dimension
+            );
+            Some(Arc::new(service))
+        } else {
+            info!("Embedding service disabled (enable via embeddings.enabled=true)");
+            None
+        };
+
+        // Initialize Indexing service for codebase semantic search (requires embeddings + postgres)
+        let indexing_service = match (&embedding_service, &postgres) {
+            (Some(emb_svc), Some(pg_svc)) if config.indexing.enabled => {
+                let service = IndexingService::new(
+                    config.indexing.clone(),
+                    Arc::clone(emb_svc),
+                    Arc::clone(pg_svc),
+                );
+                info!("Codebase indexing service enabled");
+                Some(Arc::new(service))
+            }
+            _ => {
+                if config.indexing.enabled {
+                    info!(
+                        "Codebase indexing disabled (requires embeddings + postgres)"
+                    );
+                } else {
+                    debug!("Codebase indexing disabled via config");
+                }
+                None
+            }
+        };
+
         let state = DaemonState {
             config: config.clone(),
             agent_manager: agent_manager.clone(),
@@ -188,6 +235,8 @@ impl CCADaemon {
             tmux_manager,
             busy_agents: Arc::new(RwLock::new(HashMap::new())),
             health_cache: Arc::new(RwLock::new(None)),
+            embedding_service,
+            indexing_service,
         };
 
         Ok(Self {
@@ -304,6 +353,14 @@ fn create_router(state: DaemonState) -> Router {
         .route("/api/v1/redis/status", get(redis_status))
         .route("/api/v1/postgres/status", get(postgres_status))
         .route("/api/v1/memory/search", post(memory_search))
+        .route("/api/v1/memory/backfill-embeddings", post(backfill_embeddings))
+        // Codebase indexing endpoints
+        .route("/api/v1/memory/index", post(start_indexing))
+        .route("/api/v1/memory/index/:job_id", get(get_indexing_status))
+        .route("/api/v1/memory/index/:job_id/cancel", post(cancel_indexing))
+        .route("/api/v1/memory/index/jobs", get(list_indexing_jobs))
+        .route("/api/v1/code/search", post(search_code))
+        .route("/api/v1/code/stats", get(code_stats))
         .route("/api/v1/pubsub/broadcast", post(pubsub_broadcast))
         .route("/api/v1/acp/status", get(acp_status))
         .route("/api/v1/acp/disconnect", post(acp_disconnect))
@@ -681,6 +738,7 @@ pub struct ServiceHealth {
     pub redis: bool,
     pub postgres: bool,
     pub acp: bool,
+    pub embeddings: bool,
 }
 
 /// Cached health check result - PERF-003
@@ -706,6 +764,13 @@ async fn health_check(State(state): State<DaemonState>) -> Json<HealthResponse> 
     let redis_ok = state.redis.is_some();
     let postgres_ok = state.postgres.is_some();
 
+    // Actually verify Ollama connectivity for embeddings
+    let embeddings_ok = if let Some(ref emb_service) = state.embedding_service {
+        emb_service.health_check().await
+    } else {
+        false
+    };
+
     let status = if redis_ok && postgres_ok {
         "healthy"
     } else {
@@ -719,6 +784,7 @@ async fn health_check(State(state): State<DaemonState>) -> Json<HealthResponse> 
             redis: redis_ok,
             postgres: postgres_ok,
             acp: true, // Always true if daemon is running
+            embeddings: embeddings_ok,
         },
     };
 
@@ -755,6 +821,19 @@ async fn get_status(State(state): State<DaemonState>) -> Json<serde_json::Value>
         })
         .collect();
 
+    // Get embedding service info
+    let embeddings_info = if let Some(ref emb_service) = state.embedding_service {
+        serde_json::json!({
+            "enabled": true,
+            "model": emb_service.model(),
+            "dimension": emb_service.dimension()
+        })
+    } else {
+        serde_json::json!({
+            "enabled": false
+        })
+    };
+
     Json(serde_json::json!({
         "status": "running",
         "version": env!("CARGO_PKG_VERSION"),
@@ -764,7 +843,8 @@ async fn get_status(State(state): State<DaemonState>) -> Json<serde_json::Value>
         "tmux": {
             "available": state.tmux_manager.is_available(),
             "auto_spawned_agents": tmux_agents_info
-        }
+        },
+        "embeddings": embeddings_info
     }))
 }
 
@@ -1845,6 +1925,27 @@ async fn store_task_as_pattern(
         "pattern_source": "automatic_task_completion"
     });
 
+    // Generate embedding if embedding service is available
+    // Combine task description and output for richer semantic representation
+    let embedding = if let Some(ref emb_service) = state.embedding_service {
+        let text_for_embedding = format!("Task: {}\n\nSolution: {}",
+            safe_truncate(task_description, 500),
+            safe_truncate(output, 1500)
+        );
+        match emb_service.embed(&text_for_embedding).await {
+            Ok(emb) => {
+                debug!("Generated embedding ({} dims) for pattern", emb.len());
+                Some(emb)
+            }
+            Err(e) => {
+                warn!("Failed to generate embedding: {} - storing without embedding", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Store the pattern with Solution type
     match postgres_services
         .patterns
@@ -1852,13 +1953,14 @@ async fn store_task_as_pattern(
             Some(agent_id.0), // Extract Uuid from AgentId
             crate::postgres::PatternType::Solution,
             output,
-            None, // No embedding yet
+            embedding.as_deref(),
             metadata,
         )
         .await
     {
         Ok(pattern_id) => {
-            debug!("Stored pattern {} for {} agent {} ({}ms)", pattern_id, role, agent_id, duration_ms);
+            let with_emb = if embedding.is_some() { " (with embedding)" } else { "" };
+            debug!("Stored pattern {}{} for {} agent {} ({}ms)", pattern_id, with_emb, role, agent_id, duration_ms);
         }
         Err(e) => {
             warn!("Failed to store pattern for {} agent {}: {}", role, agent_id, e);
@@ -2267,6 +2369,7 @@ fn default_limit() -> i32 {
 }
 
 /// Memory search endpoint - query ReasoningBank patterns
+/// Uses semantic search (embeddings) when available, falls back to text search
 async fn memory_search(
     State(state): State<DaemonState>,
     Json(request): Json<MemorySearchRequest>,
@@ -2283,42 +2386,392 @@ async fn memory_search(
         }));
     }
 
-    match &state.postgres {
-        Some(postgres) => {
-            // First try text search (embedding search would require an embedding model)
-            match postgres.patterns.search_text(&request.query, request.limit).await {
-                Ok(patterns) => {
-                    let results: Vec<serde_json::Value> = patterns
-                        .iter()
-                        .map(|p| {
-                            serde_json::json!({
-                                "id": p.id.to_string(),
-                                "pattern_type": p.pattern_type,
-                                "content": p.content,
-                                "success_rate": p.success_rate,
-                                "success_count": p.success_count,
-                                "failure_count": p.failure_count,
-                                "created_at": p.created_at.to_rfc3339()
-                            })
-                        })
-                        .collect();
+    let postgres = match &state.postgres {
+        Some(pg) => pg,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "PostgreSQL not available"
+            }));
+        }
+    };
 
-                    Json(serde_json::json!({
-                        "success": true,
-                        "patterns": results,
-                        "count": results.len(),
-                        "query": request.query
-                    }))
+    // Try semantic search if embedding service is available
+    if let Some(ref emb_service) = state.embedding_service {
+        match emb_service.embed(&request.query).await {
+            Ok(query_embedding) => {
+                // Use cosine similarity search with minimum threshold of 0.3
+                match postgres.patterns.search_similar(&query_embedding, request.limit, 0.3).await {
+                    Ok(patterns) => {
+                        let results: Vec<serde_json::Value> = patterns
+                            .iter()
+                            .map(|pw| {
+                                serde_json::json!({
+                                    "id": pw.pattern.id.to_string(),
+                                    "pattern_type": pw.pattern.pattern_type,
+                                    "content": pw.pattern.content,
+                                    "success_rate": pw.pattern.success_rate,
+                                    "success_count": pw.pattern.success_count,
+                                    "failure_count": pw.pattern.failure_count,
+                                    "similarity": pw.similarity,
+                                    "created_at": pw.pattern.created_at.to_rfc3339()
+                                })
+                            })
+                            .collect();
+
+                        return Json(serde_json::json!({
+                            "success": true,
+                            "patterns": results,
+                            "count": results.len(),
+                            "query": request.query,
+                            "search_type": "semantic"
+                        }));
+                    }
+                    Err(e) => {
+                        warn!("Semantic search failed, falling back to text: {}", e);
+                        // Fall through to text search
+                    }
                 }
-                Err(e) => Json(serde_json::json!({
-                    "success": false,
-                    "error": format!("Failed to search patterns: {}", e)
-                })),
+            }
+            Err(e) => {
+                warn!("Failed to generate query embedding, falling back to text: {}", e);
+                // Fall through to text search
             }
         }
-        None => Json(serde_json::json!({
+    }
+
+    // Fallback: text search (when embeddings not available or semantic search fails)
+    match postgres.patterns.search_text(&request.query, request.limit).await {
+        Ok(patterns) => {
+            let results: Vec<serde_json::Value> = patterns
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "id": p.id.to_string(),
+                        "pattern_type": p.pattern_type,
+                        "content": p.content,
+                        "success_rate": p.success_rate,
+                        "success_count": p.success_count,
+                        "failure_count": p.failure_count,
+                        "created_at": p.created_at.to_rfc3339()
+                    })
+                })
+                .collect();
+
+            Json(serde_json::json!({
+                "success": true,
+                "patterns": results,
+                "count": results.len(),
+                "query": request.query,
+                "search_type": "text"
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
             "success": false,
-            "error": "PostgreSQL not available"
+            "error": format!("Failed to search patterns: {}", e)
+        })),
+    }
+}
+
+/// Backfill embeddings for patterns that don't have them
+/// Uses embed_batch for efficient bulk processing
+async fn backfill_embeddings(
+    State(state): State<DaemonState>,
+) -> Json<serde_json::Value> {
+    // Check prerequisites
+    let emb_service = match &state.embedding_service {
+        Some(svc) => svc,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Embedding service not configured"
+            }));
+        }
+    };
+
+    let postgres = match &state.postgres {
+        Some(pg) => pg,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "PostgreSQL not available"
+            }));
+        }
+    };
+
+    // Get patterns without embeddings (batch of 10)
+    let patterns = match postgres.patterns.get_without_embeddings(10).await {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to get patterns: {}", e)
+            }));
+        }
+    };
+
+    if patterns.is_empty() {
+        return Json(serde_json::json!({
+            "success": true,
+            "message": "No patterns need embedding backfill",
+            "processed": 0
+        }));
+    }
+
+    // Prepare texts for batch embedding
+    let texts: Vec<&str> = patterns
+        .iter()
+        .map(|p| p.content.as_str())
+        .collect();
+
+    // Generate embeddings in batch
+    let embeddings = match emb_service.embed_batch(&texts).await {
+        Ok(embs) => embs,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to generate embeddings: {}", e)
+            }));
+        }
+    };
+
+    // Update patterns with embeddings
+    let mut updated = 0;
+    let mut errors = 0;
+    for (pattern, embedding) in patterns.iter().zip(embeddings.iter()) {
+        match postgres.patterns.update_embedding(pattern.id, embedding).await {
+            Ok(()) => updated += 1,
+            Err(e) => {
+                warn!("Failed to update embedding for pattern {}: {}", pattern.id, e);
+                errors += 1;
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "success": true,
+        "processed": updated,
+        "errors": errors,
+        "remaining": patterns.len() as i32 - updated - errors
+    }))
+}
+
+// ============================================================================
+// Codebase Indexing Endpoints
+// ============================================================================
+
+/// Start a codebase indexing job
+async fn start_indexing(
+    State(state): State<DaemonState>,
+    Json(request): Json<StartIndexingRequest>,
+) -> Json<serde_json::Value> {
+    let indexing_service = match &state.indexing_service {
+        Some(svc) => svc,
+        None => {
+            return Json(serde_json::json!({
+                "job_id": "",
+                "status": "error",
+                "message": "Indexing service not available (requires embeddings + postgres)"
+            }));
+        }
+    };
+
+    match indexing_service.start_indexing(request).await {
+        Ok(job_id) => Json(serde_json::json!({
+            "job_id": job_id.to_string(),
+            "status": "started",
+            "message": "Indexing job started in background"
+        })),
+        Err(e) => Json(serde_json::json!({
+            "job_id": "",
+            "status": "error",
+            "message": format!("Failed to start indexing: {}", e)
+        })),
+    }
+}
+
+/// Get indexing job status
+async fn get_indexing_status(
+    State(state): State<DaemonState>,
+    Path(job_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let indexing_service = match &state.indexing_service {
+        Some(svc) => svc,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Indexing service not available"
+            }));
+        }
+    };
+
+    let job_uuid = match Uuid::parse_str(&job_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Invalid job ID format"
+            }));
+        }
+    };
+
+    match indexing_service.get_job_status(job_uuid).await {
+        Ok(Some(status)) => Json(serde_json::json!({
+            "success": true,
+            "job": status
+        })),
+        Ok(None) => Json(serde_json::json!({
+            "success": false,
+            "error": "Job not found"
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": format!("Failed to get job status: {}", e)
+        })),
+    }
+}
+
+/// Cancel a running indexing job
+async fn cancel_indexing(
+    State(state): State<DaemonState>,
+    Path(job_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let indexing_service = match &state.indexing_service {
+        Some(svc) => svc,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Indexing service not available"
+            }));
+        }
+    };
+
+    let job_uuid = match Uuid::parse_str(&job_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Invalid job ID format"
+            }));
+        }
+    };
+
+    match indexing_service.cancel_job(job_uuid).await {
+        Ok(true) => Json(serde_json::json!({
+            "success": true,
+            "message": "Job cancelled"
+        })),
+        Ok(false) => Json(serde_json::json!({
+            "success": false,
+            "error": "Job not found or not running"
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": format!("Failed to cancel job: {}", e)
+        })),
+    }
+}
+
+/// List recent indexing jobs
+async fn list_indexing_jobs(
+    State(state): State<DaemonState>,
+) -> Json<serde_json::Value> {
+    let indexing_service = match &state.indexing_service {
+        Some(svc) => svc,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Indexing service not available"
+            }));
+        }
+    };
+
+    match indexing_service.list_jobs(20).await {
+        Ok(jobs) => Json(serde_json::json!({
+            "success": true,
+            "jobs": jobs,
+            "count": jobs.len()
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": format!("Failed to list jobs: {}", e)
+        })),
+    }
+}
+
+/// Search request for indexed code
+#[derive(Debug, Deserialize)]
+struct SearchCodeRequest {
+    query: String,
+    #[serde(default = "default_limit")]
+    limit: i32,
+    #[serde(default)]
+    language: Option<String>,
+}
+
+/// Search indexed code chunks
+async fn search_code(
+    State(state): State<DaemonState>,
+    Json(request): Json<SearchCodeRequest>,
+) -> Json<serde_json::Value> {
+    if request.query.len() > MAX_QUERY_LEN {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": format!(
+                "Query too long: {} bytes (max: {} bytes)",
+                request.query.len(),
+                MAX_QUERY_LEN
+            )
+        }));
+    }
+
+    let indexing_service = match &state.indexing_service {
+        Some(svc) => svc,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Indexing service not available"
+            }));
+        }
+    };
+
+    match indexing_service
+        .search_code(&request.query, request.limit, request.language.as_deref())
+        .await
+    {
+        Ok(results) => Json(serde_json::json!({
+            "success": true,
+            "results": results,
+            "count": results.len(),
+            "query": request.query
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": format!("Search failed: {}", e)
+        })),
+    }
+}
+
+/// Get code indexing statistics
+async fn code_stats(State(state): State<DaemonState>) -> Json<serde_json::Value> {
+    let indexing_service = match &state.indexing_service {
+        Some(svc) => svc,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Indexing service not available"
+            }));
+        }
+    };
+
+    match indexing_service.get_stats().await {
+        Ok(stats) => Json(serde_json::json!({
+            "success": true,
+            "stats": stats
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": format!("Failed to get stats: {}", e)
         })),
     }
 }

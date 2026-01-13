@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS patterns (
     agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
     pattern_type VARCHAR(50) NOT NULL,
     content TEXT NOT NULL,
-    embedding vector(1536),  -- OpenAI ada-002 dimension
+    embedding vector(768),  -- nomic-embed-text dimension (via Ollama)
     success_count INTEGER DEFAULT 0,
     failure_count INTEGER DEFAULT 0,
     success_rate FLOAT GENERATED ALWAYS AS (

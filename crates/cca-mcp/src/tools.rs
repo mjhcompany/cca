@@ -203,6 +203,53 @@ impl ToolRegistry {
                     "properties": {}
                 }),
             },
+            // Codebase indexing tools
+            McpTool {
+                name: "cca_index_codebase".to_string(),
+                description: "Index a codebase for semantic code search. Extracts functions, classes, and methods, generates embeddings for similarity search.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the directory to index"
+                        },
+                        "extensions": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "File extensions to include (default: common code files)"
+                        },
+                        "exclude_patterns": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Glob patterns to exclude (e.g., '**/node_modules/**')"
+                        }
+                    },
+                    "required": ["path"]
+                }),
+            },
+            McpTool {
+                name: "cca_search_code".to_string(),
+                description: "Search indexed code using semantic similarity. Finds functions, classes, and methods matching your query.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Natural language search query"
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Maximum results (default: 10)"
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": "Filter by programming language (e.g., 'rust', 'python')"
+                        }
+                    },
+                    "required": ["query"]
+                }),
+            },
         ];
 
         Self { tools }
@@ -238,6 +285,8 @@ impl ToolRegistry {
             "cca_tokens_compress" => self.call_tokens_compress(arguments, &client).await,
             "cca_tokens_metrics" => self.call_tokens_metrics(&client).await,
             "cca_tokens_recommendations" => self.call_tokens_recommendations(&client).await,
+            "cca_index_codebase" => self.call_index_codebase(arguments, &client).await,
+            "cca_search_code" => self.call_search_code(arguments, &client).await,
             _ => Err(anyhow!("Unknown tool: {name}")),
         }
     }
@@ -607,6 +656,75 @@ impl ToolRegistry {
             Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
             Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
                 "error": format!("Failed to get recommendations: {}", e)
+            }))?),
+        }
+    }
+
+    async fn call_index_codebase(
+        &self,
+        arguments: &serde_json::Value,
+        client: &DaemonClient,
+    ) -> Result<String> {
+        let path = arguments["path"]
+            .as_str()
+            .ok_or_else(|| anyhow!("path is required"))?;
+
+        let extensions: Option<Vec<String>> = arguments["extensions"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            });
+
+        let exclude_patterns: Option<Vec<String>> = arguments["exclude_patterns"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            });
+
+        if !client.health().await? {
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": "CCA daemon is not running. Start it with: cca daemon start"
+            }))?);
+        }
+
+        info!("Starting codebase indexing for: {}", path);
+
+        match client.start_indexing(path, extensions, exclude_patterns, None).await {
+            Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
+            Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": format!("Failed to start indexing: {}", e)
+            }))?),
+        }
+    }
+
+    async fn call_search_code(
+        &self,
+        arguments: &serde_json::Value,
+        client: &DaemonClient,
+    ) -> Result<String> {
+        let query = arguments["query"]
+            .as_str()
+            .ok_or_else(|| anyhow!("query is required"))?;
+
+        let limit = arguments["limit"].as_i64().map(|l| l as i32);
+        let language = arguments["language"].as_str();
+
+        if !client.health().await? {
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": "CCA daemon is not running. Start it with: cca daemon start"
+            }))?);
+        }
+
+        info!("Searching code for: {}", query);
+
+        match client.search_code(query, limit, language).await {
+            Ok(response) => Ok(serde_json::to_string_pretty(&response)?),
+            Err(e) => Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "error": format!("Failed to search code: {}", e)
             }))?),
         }
     }

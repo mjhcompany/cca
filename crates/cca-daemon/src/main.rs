@@ -32,8 +32,11 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod agent_manager;
 mod auth;
+mod code_parser;
 mod config;
 mod daemon;
+mod embeddings;
+mod indexing;
 mod orchestrator;
 mod postgres;
 mod redis;

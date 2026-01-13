@@ -234,7 +234,7 @@ Get specific task status.
 
 ### POST /api/v1/memory/search
 
-Search patterns in ReasoningBank.
+Search patterns in ReasoningBank with semantic search support. When embeddings are available, performs vector similarity search using pgvector. Falls back to text-based search when embeddings are unavailable.
 
 **Request:**
 ```json
@@ -244,13 +244,40 @@ Search patterns in ReasoningBank.
 }
 ```
 
-**Response:**
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `query` | string | Yes | - | Search query text (max 1,000 bytes) |
+| `limit` | integer | No | 10 | Maximum number of results to return |
+
+**Response (Semantic Search):**
 ```json
 {
     "success": true,
     "patterns": [
         {
-            "id": "pattern-001",
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "pattern_type": "code",
+            "content": "JWT authentication pattern...",
+            "success_rate": 0.95,
+            "success_count": 19,
+            "failure_count": 1,
+            "similarity": 0.87,
+            "created_at": "2024-01-10T10:00:00Z"
+        }
+    ],
+    "count": 1,
+    "query": "authentication",
+    "search_type": "semantic"
+}
+```
+
+**Response (Text Search Fallback):**
+```json
+{
+    "success": true,
+    "patterns": [
+        {
+            "id": "550e8400-e29b-41d4-a716-446655440000",
             "pattern_type": "code",
             "content": "JWT authentication pattern...",
             "success_rate": 0.95,
@@ -260,9 +287,164 @@ Search patterns in ReasoningBank.
         }
     ],
     "count": 1,
-    "query": "authentication"
+    "query": "authentication",
+    "search_type": "text"
 }
 ```
+
+| Response Field | Type | Description |
+|----------------|------|-------------|
+| `success` | boolean | Whether the search succeeded |
+| `patterns` | array | Array of matching pattern objects |
+| `patterns[].id` | string (UUID) | Unique pattern identifier |
+| `patterns[].pattern_type` | string | Type classification of the pattern |
+| `patterns[].content` | string | The pattern content text |
+| `patterns[].success_rate` | float \| null | Success ratio (0.0-1.0) or null if no executions |
+| `patterns[].success_count` | integer | Number of successful executions |
+| `patterns[].failure_count` | integer | Number of failed executions |
+| `patterns[].similarity` | float | Cosine similarity score (0.0-1.0), only present in semantic search |
+| `patterns[].created_at` | string (ISO 8601) | Creation timestamp |
+| `count` | integer | Number of results returned |
+| `query` | string | Echo of the input query |
+| `search_type` | string | Either `"semantic"` or `"text"` indicating search method used |
+
+**Search Behavior:**
+
+1. **Semantic Search (Primary):** When the embedding service is available:
+   - Query text is converted to a 768-dimensional vector using Ollama's `nomic-embed-text` model
+   - pgvector performs cosine similarity search against pattern embeddings
+   - Results are filtered with a minimum similarity threshold of **0.3** (30%)
+   - Results are ordered by similarity (highest first)
+
+2. **Text Search (Fallback):** When embeddings are unavailable:
+   - Uses case-insensitive substring matching (PostgreSQL `ILIKE`)
+   - Results ordered by `success_rate DESC`, then `created_at DESC`
+
+**Error Responses:**
+
+Query too long (400):
+```json
+{
+    "success": false,
+    "error": "Query too long: 1500 bytes (max: 1000 bytes)"
+}
+```
+
+PostgreSQL unavailable (503):
+```json
+{
+    "success": false,
+    "error": "PostgreSQL not available"
+}
+```
+
+---
+
+### POST /api/v1/memory/backfill-embeddings
+
+Generate embeddings for existing patterns that don't have them. Processes patterns in batches of 10, prioritizing most recently created patterns.
+
+**Request:**
+
+No request body required.
+
+**Response (Success):**
+```json
+{
+    "success": true,
+    "processed": 10,
+    "errors": 0,
+    "remaining": 45
+}
+```
+
+| Response Field | Type | Description |
+|----------------|------|-------------|
+| `success` | boolean | Whether the backfill operation succeeded |
+| `processed` | integer | Number of patterns successfully updated with embeddings |
+| `errors` | integer | Number of patterns that failed to update |
+| `remaining` | integer | Number of patterns still without embeddings |
+
+**Response (Nothing to Process):**
+```json
+{
+    "success": true,
+    "message": "No patterns need embedding backfill",
+    "processed": 0
+}
+```
+
+**How It Works:**
+
+1. Fetches up to 10 patterns where `embedding IS NULL`, ordered by `created_at DESC`
+2. Sends pattern content to Ollama embedding service for batch processing
+3. Updates each pattern with its 768-dimensional embedding vector
+4. Returns counts of processed patterns and remaining work
+
+**Usage Notes:**
+
+- Call repeatedly until `remaining` reaches 0 to backfill all patterns
+- Safe to run concurrently with normal operations
+- Individual pattern errors don't abort the batch; check `errors` count
+- Requires Ollama running with `nomic-embed-text` model available
+
+**Error Responses:**
+
+Embedding service not configured (503):
+```json
+{
+    "success": false,
+    "error": "Embedding service not configured"
+}
+```
+
+PostgreSQL unavailable (503):
+```json
+{
+    "success": false,
+    "error": "PostgreSQL not available"
+}
+```
+
+Failed to fetch patterns (500):
+```json
+{
+    "success": false,
+    "error": "Failed to get patterns: [error details]"
+}
+```
+
+Failed to generate embeddings (500):
+```json
+{
+    "success": false,
+    "error": "Failed to generate embeddings: [error details]"
+}
+```
+
+---
+
+### Embedding Configuration
+
+The semantic search feature requires:
+
+| Component | Requirement |
+|-----------|-------------|
+| PostgreSQL | pgvector extension enabled |
+| Embedding Model | Ollama with `nomic-embed-text:latest` |
+| Vector Dimensions | 768 |
+| Ollama URL | Default: `http://localhost:11434` |
+
+**Database Schema (patterns table):**
+```sql
+embedding vector(768)  -- pgvector column
+
+-- Index for fast similarity search
+CREATE INDEX idx_patterns_embedding ON patterns
+    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+```
+
+See [Configuration](./configuration.md) for embedding service setup options.
 
 ## Communication
 
