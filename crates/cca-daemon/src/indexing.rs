@@ -11,6 +11,7 @@ use glob::Pattern;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+use validator::Validate;
 use walkdir::WalkDir;
 
 use crate::code_parser::{CodeChunk, CodeParser};
@@ -69,15 +70,38 @@ impl From<IndexingJobRecord> for IndexingJobStatus {
 }
 
 /// Request to start an indexing job
-#[derive(Debug, Clone, serde::Deserialize)]
+/// SEC-012: Validated with path safety and length limits
+#[derive(Debug, Clone, serde::Deserialize, Validate)]
 pub struct StartIndexingRequest {
+    #[validate(length(min = 1, max = 4096, message = "Path must be 1-4096 characters"))]
+    #[validate(custom(function = "validate_indexing_path"))]
     pub path: String,
     #[serde(default)]
+    #[validate(length(max = 100, message = "At most 100 extensions allowed"))]
     pub extensions: Option<Vec<String>>,
     #[serde(default)]
+    #[validate(length(max = 100, message = "At most 100 exclude patterns allowed"))]
     pub exclude_patterns: Option<Vec<String>>,
     #[serde(default = "default_batch_size")]
+    #[validate(range(min = 1, max = 100, message = "Batch size must be 1-100"))]
     pub batch_size: usize,
+}
+
+/// Validate indexing path (must be absolute, no path traversal)
+fn validate_indexing_path(path: &str) -> Result<(), validator::ValidationError> {
+    // Check for path traversal attempts
+    if path.contains("..") {
+        let mut err = validator::ValidationError::new("path_traversal");
+        err.message = Some("Path traversal not allowed".into());
+        return Err(err);
+    }
+    // Require absolute path
+    if !path.starts_with('/') {
+        let mut err = validator::ValidationError::new("relative_path");
+        err.message = Some("Path must be absolute".into());
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn default_batch_size() -> usize {

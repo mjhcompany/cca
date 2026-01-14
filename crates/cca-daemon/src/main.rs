@@ -3,43 +3,49 @@
 //! The daemon manages Claude Code instances, routes tasks, and provides
 //! the core orchestration functionality for CCA.
 
-// Clippy pedantic allows - these are intentional design choices
+// Pedantic clippy allows - intentional design decisions for this crate:
+// - doc_markdown: SEC-XXX security tags are pervasive and don't need backticks
+// - too_many_lines: Complex initialization functions are kept cohesive
+// - similar_names: stats/state naming is clear in context
+// - struct_excessive_bools: Config structs intentionally have many boolean flags
+// - cast_precision_loss: Duration conversions are safe within expected ranges
+// - cast_possible_truncation: u128->u64 duration conversions are safe (< 584 years)
+// - cast_sign_loss: Signed/unsigned casts in metrics are controlled
+// - cast_possible_wrap: i32/usize conversions are bounded by data
+// - cast_lossless: u32 to f64 is intentional for metrics
+// - if_not_else: "if !x.is_empty()" is often more readable than inverted branches
+// - manual_let_else: match with Ok/Some patterns is often clearer than let-else
+// - single_match_else: single-arm match with else is a valid pattern
+// - ref_option: &Option<T> in function signatures is valid for optional params
+// - bool_to_int_with_if: explicit if conversion is often clearer
+// - unused_self: Methods preserve API consistency even when self unused
+// - unnecessary_wraps: Consistent Result returns for API uniformity
+// - map_unwrap_or: map().unwrap_or() pattern is idiomatic
+// - format_push_string: format! append is clearer than write! for simple cases
+// - unused_async: Async handlers maintain consistency in axum
+// - used_underscore_binding: _ prefix is intentional for unused-but-required params
+// - no_effect_underscore_binding: Side-effect detection for _ bindings
 #![allow(clippy::doc_markdown)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::return_self_not_must_use)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_lossless)]
 #![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::unused_async)]
-#![allow(clippy::unused_self)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::ref_option)]
-#![allow(clippy::manual_let_else)]
-#![allow(clippy::map_unwrap_or)]
-#![allow(clippy::float_cmp)]
-#![allow(clippy::match_same_arms)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::single_match_else)]
-#![allow(clippy::format_push_string)]
-#![allow(clippy::bool_to_int_with_if)]
-#![allow(clippy::match_bool)]
-#![allow(clippy::needless_bool)]
-#![allow(clippy::redundant_else)]
+#![allow(clippy::cast_lossless)]
 #![allow(clippy::if_not_else)]
-#![allow(clippy::only_used_in_recursion)]
+#![allow(clippy::manual_let_else)]
+#![allow(clippy::single_match_else)]
+#![allow(clippy::ref_option)]
+#![allow(clippy::bool_to_int_with_if)]
+#![allow(clippy::unused_self)]
 #![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::map_unwrap_or)]
+#![allow(clippy::format_push_string)]
+#![allow(clippy::unused_async)]
 #![allow(clippy::used_underscore_binding)]
 #![allow(clippy::no_effect_underscore_binding)]
-#![allow(clippy::use_debug)]
-#![allow(clippy::match_wildcard_for_single_variants)]
-#![allow(clippy::trivially_copy_pass_by_ref)]
-#![allow(clippy::unit_arg)]
-#![allow(clippy::ignored_unit_patterns)]
 
 use std::sync::Arc;
 
@@ -62,6 +68,7 @@ mod redis;
 mod rl;
 mod tmux;
 mod tokens;
+mod validation;
 
 use crate::config::Config;
 use crate::daemon::CCADaemon;

@@ -18,6 +18,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use axum::extract::DefaultBodyLimit;
+use tower_http::set_header::SetResponseHeaderLayer;
+use validator::Validate;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -41,6 +44,13 @@ use crate::rl::{RLConfig, RLService};
 use crate::tokens::TokenService;
 use crate::embeddings::{EmbeddingConfig, EmbeddingService};
 use crate::indexing::{IndexingService, StartIndexingRequest};
+use crate::validation::{
+    DEFAULT_BODY_LIMIT,
+    MAX_TASK_DESCRIPTION_LEN, MAX_BROADCAST_MESSAGE_LEN, MAX_CONTENT_LEN,
+    MAX_QUERY_LEN, MAX_ROLE_LEN, MAX_ALGORITHM_LEN, MAX_PATH_LEN,
+    MAX_PRIORITY_LEN, MAX_TIMEOUT_SECONDS, MIN_TIMEOUT_SECONDS,
+    VALID_PRIORITIES, VALID_RL_ALGORITHMS,
+};
 
 /// Shared daemon state for API handlers
 #[derive(Clone)]
@@ -413,6 +423,16 @@ fn create_router(state: DaemonState) -> Router {
         debug!("CORS disabled (no origins configured)");
     }
 
+    // SEC-011: Apply security headers middleware
+    // These headers protect against common web vulnerabilities
+    router = apply_security_headers(router);
+    info!("Security headers enabled (X-Content-Type-Options, X-Frame-Options, X-XSS-Protection, CSP, etc.)");
+
+    // SEC-012: Apply request body size limit (1MB)
+    // Prevents memory exhaustion attacks from oversized request bodies
+    router = router.layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT));
+    info!("Request body size limit: {} bytes", DEFAULT_BODY_LIMIT);
+
     router.with_state(state)
 }
 
@@ -490,6 +510,125 @@ fn build_cors_layer(
     cors
 }
 
+/// SEC-011: Apply security headers to all HTTP responses
+///
+/// SECURITY: This function adds standard security headers to protect against:
+/// - MIME type sniffing attacks (X-Content-Type-Options: nosniff)
+/// - Clickjacking attacks (X-Frame-Options: DENY)
+/// - XSS attacks (X-XSS-Protection, Content-Security-Policy)
+/// - Information disclosure (X-Powered-By removal, Referrer-Policy)
+/// - HTTPS downgrade attacks (Strict-Transport-Security)
+/// - Cross-origin information leakage (Cross-Origin-* headers)
+fn apply_security_headers(router: Router<DaemonState>) -> Router<DaemonState> {
+    use axum::http::header::{HeaderName, HeaderValue};
+
+    // SEC-011: X-Content-Type-Options: nosniff
+    // Prevents MIME type sniffing attacks
+    let x_content_type_options = SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+
+    // SEC-011: X-Frame-Options: DENY
+    // Prevents clickjacking by disallowing framing
+    let x_frame_options = SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+
+    // SEC-011: X-XSS-Protection: 1; mode=block
+    // Legacy XSS protection for older browsers
+    // Note: Modern browsers have deprecated this in favor of CSP
+    let x_xss_protection = SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("x-xss-protection"),
+        HeaderValue::from_static("1; mode=block"),
+    );
+
+    // SEC-011: Content-Security-Policy
+    // Restricts resource loading to prevent XSS and data injection attacks
+    // This is a restrictive policy suitable for an API server:
+    // - default-src 'none': Block all resources by default
+    // - frame-ancestors 'none': Prevent framing (defense in depth with X-Frame-Options)
+    let content_security_policy = SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"),
+    );
+
+    // SEC-011: Referrer-Policy: strict-origin-when-cross-origin
+    // Controls how much referrer information is sent
+    let referrer_policy = SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+
+    // SEC-011: X-Permitted-Cross-Domain-Policies: none
+    // Prevents Adobe Flash and Acrobat from loading data from this domain
+    let x_permitted_cross_domain = SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("x-permitted-cross-domain-policies"),
+        HeaderValue::from_static("none"),
+    );
+
+    // SEC-011: Cross-Origin-Embedder-Policy: require-corp
+    // Prevents loading cross-origin resources without explicit permission
+    let cross_origin_embedder = SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("cross-origin-embedder-policy"),
+        HeaderValue::from_static("require-corp"),
+    );
+
+    // SEC-011: Cross-Origin-Opener-Policy: same-origin
+    // Prevents other documents from opening this one in a popup
+    let cross_origin_opener = SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("cross-origin-opener-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+
+    // SEC-011: Cross-Origin-Resource-Policy: same-origin
+    // Prevents other origins from reading this resource
+    let cross_origin_resource = SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("cross-origin-resource-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+
+    // SEC-011: Permissions-Policy
+    // Restricts browser features that the API doesn't need
+    // Disables camera, microphone, geolocation, etc.
+    let permissions_policy = SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static(
+            "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+        ),
+    );
+
+    // SEC-011: Cache-Control for API responses
+    // Prevents caching of sensitive API responses
+    let cache_control = SetResponseHeaderLayer::overriding(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate, private"),
+    );
+
+    // SEC-011: Pragma: no-cache (for HTTP/1.0 compatibility)
+    let pragma = SetResponseHeaderLayer::overriding(
+        axum::http::header::PRAGMA,
+        HeaderValue::from_static("no-cache"),
+    );
+
+    // Apply all security headers as layers
+    // Note: Layers are applied in reverse order (last added = first executed)
+    router
+        .layer(x_content_type_options)
+        .layer(x_frame_options)
+        .layer(x_xss_protection)
+        .layer(content_security_policy)
+        .layer(referrer_policy)
+        .layer(x_permitted_cross_domain)
+        .layer(cross_origin_embedder)
+        .layer(cross_origin_opener)
+        .layer(cross_origin_resource)
+        .layer(permissions_policy)
+        .layer(cache_control)
+        .layer(pragma)
+}
+
 /// Health check cache TTL (5 seconds) - PERF-003
 const HEALTH_CHECK_TTL_SECS: u64 = 5;
 
@@ -551,12 +690,16 @@ async fn task_cleanup_job(tasks: Arc<RwLock<HashMap<String, TaskState>>>) {
 }
 
 // API Request/Response types
+// Note: Validation constants (MAX_*, VALID_*) are imported from crate::validation
 
-/// Maximum size limits for API inputs (security: prevent DoS via memory exhaustion)
-const MAX_TASK_DESCRIPTION_LEN: usize = 100_000;   // 100KB
-const MAX_BROADCAST_MESSAGE_LEN: usize = 10_000;   // 10KB
-const MAX_CONTENT_LEN: usize = 1_000_000;          // 1MB
-const MAX_QUERY_LEN: usize = 1_000;                // 1KB
+/// Max log lines to return (specific to this module)
+const MAX_LOG_LINES: usize = 10_000;
+/// Max file extensions to filter (specific to indexing)
+const MAX_EXTENSIONS: usize = 100;
+/// Max exclude glob patterns (specific to indexing)
+const MAX_EXCLUDE_PATTERNS: usize = 100;
+/// Max JSON params size (specific to RL params endpoint)
+const MAX_JSON_PARAMS_SIZE: usize = 10_000;
 
 /// SEC-009: Sanitize broadcast message content to prevent injection attacks
 /// Removes or escapes potentially dangerous content before forwarding to agents
@@ -633,10 +776,14 @@ RULES:
 - Use "security" for security reviews
 - Use "qa" for testing"#;
 
-#[derive(Debug, Clone, Deserialize)]
+/// Request to create a new task
+/// SEC-012: Validated with max length and priority whitelist
+#[derive(Debug, Clone, Deserialize, Validate)]
 pub struct CreateTaskRequest {
+    #[validate(length(min = 1, max = 100000, message = "Description must be 1-100000 characters"))]
     pub description: String,
     #[serde(default)]
+    #[validate(length(max = 16, message = "Priority must be at most 16 characters"))]
     pub priority: Option<String>,
 }
 
@@ -649,23 +796,31 @@ pub struct TaskResponse {
     pub assigned_agent: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// Request to spawn a new agent
+/// SEC-012: Validated with max role length
+#[derive(Debug, Clone, Deserialize, Validate)]
 pub struct SpawnAgentRequest {
+    #[validate(length(min = 1, max = 64, message = "Role must be 1-64 characters"))]
     pub role: String,
 }
 
 /// Request for delegating a task to a specialist agent
-#[derive(Debug, Clone, Deserialize)]
+/// SEC-012: Validated with max lengths and timeout bounds
+#[derive(Debug, Clone, Deserialize, Validate)]
 pub struct DelegateTaskRequest {
     /// The role of the agent to delegate to (frontend, backend, dba, devops, security, qa)
+    #[validate(length(min = 1, max = 64, message = "Role must be 1-64 characters"))]
     pub role: String,
     /// The task description to send to the agent
+    #[validate(length(min = 1, max = 100000, message = "Task must be 1-100000 characters"))]
     pub task: String,
     /// Optional context to include
     #[serde(default)]
+    #[validate(length(max = 100000, message = "Context must be at most 100000 characters"))]
     pub context: Option<String>,
-    /// Timeout in seconds (default: 120)
+    /// Timeout in seconds (default: 120, range: 1-3600)
     #[serde(default = "default_delegate_timeout")]
+    #[validate(range(min = 1, max = 3600, message = "Timeout must be 1-3600 seconds"))]
     pub timeout_seconds: u64,
 }
 
@@ -710,10 +865,13 @@ pub struct CoordinatorDelegation {
 }
 
 /// Request for sending a message to an agent (task mode)
-#[derive(Debug, Clone, Deserialize)]
+/// SEC-012: Validated with max length and timeout bounds
+#[derive(Debug, Clone, Deserialize, Validate)]
 pub struct SendToAgentRequest {
+    #[validate(length(min = 1, max = 100000, message = "Message must be 1-100000 characters"))]
     pub message: String,
     #[serde(default = "default_delegate_timeout")]
+    #[validate(range(min = 1, max = 3600, message = "Timeout must be 1-3600 seconds"))]
     pub timeout_seconds: u64,
 }
 
@@ -893,6 +1051,16 @@ async fn spawn_agent(
     State(state): State<DaemonState>,
     Json(request): Json<SpawnAgentRequest>,
 ) -> Json<serde_json::Value> {
+    // SEC-008: Input validation - check role length
+    if request.role.len() > MAX_ROLE_LEN {
+        return Json(serde_json::json!({
+            "error": format!(
+                "Role name too long: {} bytes (max: {} bytes)",
+                request.role.len(), MAX_ROLE_LEN
+            )
+        }));
+    }
+
     let role = match request.role.to_lowercase().as_str() {
         "coordinator" => AgentRole::Coordinator,
         "frontend" => AgentRole::Frontend,
@@ -903,7 +1071,7 @@ async fn spawn_agent(
         "qa" => AgentRole::QA,
         _ => {
             return Json(serde_json::json!({
-                "error": format!("Unknown agent role: {}", request.role)
+                "error": format!("Unknown agent role: '{}'. Valid roles: coordinator, frontend, backend, dba, devops, security, qa", request.role)
             }));
         }
     };
@@ -953,7 +1121,7 @@ async fn send_to_agent(
 ) -> Json<SendToAgentResponse> {
     let start = std::time::Instant::now();
 
-    // Validate input size
+    // SEC-008: Validate input size
     if request.message.len() > MAX_TASK_DESCRIPTION_LEN {
         return Json(SendToAgentResponse {
             success: false,
@@ -962,6 +1130,20 @@ async fn send_to_agent(
                 "Message too large: {} bytes (max: {} bytes)",
                 request.message.len(),
                 MAX_TASK_DESCRIPTION_LEN
+            )),
+            duration_ms: start.elapsed().as_millis() as u64,
+            tokens_used: 0,
+        });
+    }
+
+    // SEC-008: Validate timeout bounds
+    if request.timeout_seconds < MIN_TIMEOUT_SECONDS || request.timeout_seconds > MAX_TIMEOUT_SECONDS {
+        return Json(SendToAgentResponse {
+            success: false,
+            output: None,
+            error: Some(format!(
+                "Timeout must be between {} and {} seconds, got: {}",
+                MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, request.timeout_seconds
             )),
             duration_ms: start.elapsed().as_millis() as u64,
             tokens_used: 0,
@@ -1165,8 +1347,11 @@ async fn get_agent_logs(
         }
     };
 
+    // SEC-008: Validate lines parameter to prevent excessive memory usage
+    let lines = query.lines.min(MAX_LOG_LINES);
+
     let manager = state.agent_manager.read().await;
-    let logs = manager.get_logs(agent_id, query.lines);
+    let logs = manager.get_logs(agent_id, lines);
 
     let log_entries: Vec<serde_json::Value> = logs
         .iter()
@@ -1227,6 +1412,38 @@ async fn delegate_task(
                 tokens_used: 0,
             });
         }
+    }
+
+    // SEC-008: Input validation - check timeout bounds
+    if request.timeout_seconds < MIN_TIMEOUT_SECONDS || request.timeout_seconds > MAX_TIMEOUT_SECONDS {
+        return Json(DelegateTaskResponse {
+            success: false,
+            agent_id: String::new(),
+            role: request.role.clone(),
+            output: None,
+            error: Some(format!(
+                "Timeout must be between {} and {} seconds, got: {}",
+                MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, request.timeout_seconds
+            )),
+            duration_ms: start.elapsed().as_millis() as u64,
+            tokens_used: 0,
+        });
+    }
+
+    // SEC-008: Input validation - check role length
+    if request.role.len() > MAX_ROLE_LEN {
+        return Json(DelegateTaskResponse {
+            success: false,
+            agent_id: String::new(),
+            role: request.role.clone(),
+            output: None,
+            error: Some(format!(
+                "Role name too long: {} bytes (max: {} bytes)",
+                request.role.len(), MAX_ROLE_LEN
+            )),
+            duration_ms: start.elapsed().as_millis() as u64,
+            tokens_used: 0,
+        });
     }
 
     // Parse role
@@ -1446,7 +1663,7 @@ async fn create_task(
     State(state): State<DaemonState>,
     Json(request): Json<CreateTaskRequest>,
 ) -> Json<TaskResponse> {
-    // Input validation: check description length
+    // SEC-008: Input validation - check description length
     if request.description.len() > MAX_TASK_DESCRIPTION_LEN {
         return Json(TaskResponse {
             task_id: String::new(),
@@ -1461,9 +1678,36 @@ async fn create_task(
         });
     }
 
+    // SEC-008: Input validation - validate priority against whitelist
+    let priority = request.priority.as_deref().unwrap_or("normal");
+    if priority.len() > MAX_PRIORITY_LEN {
+        return Json(TaskResponse {
+            task_id: String::new(),
+            status: "error".to_string(),
+            output: None,
+            error: Some(format!(
+                "Priority too long: {} bytes (max: {} bytes)",
+                priority.len(), MAX_PRIORITY_LEN
+            )),
+            assigned_agent: None,
+        });
+    }
+    if !VALID_PRIORITIES.contains(&priority) {
+        return Json(TaskResponse {
+            task_id: String::new(),
+            status: "error".to_string(),
+            output: None,
+            error: Some(format!(
+                "Invalid priority '{}'. Must be one of: {}",
+                priority, VALID_PRIORITIES.join(", ")
+            )),
+            assigned_agent: None,
+        });
+    }
+    let priority = priority.to_string();
+
     let task_id = Uuid::new_v4().to_string();
     let now = Utc::now();
-    let priority = request.priority.unwrap_or_else(|| "normal".to_string());
 
     // Create task state
     let task = TaskState {
@@ -2449,10 +2693,13 @@ async fn postgres_status(State(state): State<DaemonState>) -> Json<serde_json::V
 }
 
 /// Memory search request
-#[derive(Debug, Clone, Deserialize)]
+/// SEC-012: Validated with max query length
+#[derive(Debug, Clone, Deserialize, Validate)]
 pub struct MemorySearchRequest {
+    #[validate(length(min = 1, max = 1000, message = "Query must be 1-1000 characters"))]
     pub query: String,
     #[serde(default = "default_limit")]
+    #[validate(range(min = 1, max = 100, message = "Limit must be 1-100"))]
     pub limit: i32,
 }
 
@@ -2488,12 +2735,15 @@ async fn memory_search(
         }
     };
 
+    // Clamp limit to prevent resource exhaustion
+    let limit = request.limit.clamp(1, 100);
+
     // Try semantic search if embedding service is available
     if let Some(ref emb_service) = state.embedding_service {
         match emb_service.embed(&request.query).await {
             Ok(query_embedding) => {
                 // Use cosine similarity search with minimum threshold of 0.3
-                match postgres.patterns.search_similar(&query_embedding, request.limit, 0.3).await {
+                match postgres.patterns.search_similar(&query_embedding, limit, 0.3).await {
                     Ok(patterns) => {
                         let results: Vec<serde_json::Value> = patterns
                             .iter()
@@ -2533,7 +2783,7 @@ async fn memory_search(
     }
 
     // Fallback: text search (when embeddings not available or semantic search fails)
-    match postgres.patterns.search_text(&request.query, request.limit).await {
+    match postgres.patterns.search_text(&request.query, limit).await {
         Ok(patterns) => {
             let results: Vec<serde_json::Value> = patterns
                 .iter()
@@ -2657,6 +2907,74 @@ async fn start_indexing(
     State(state): State<DaemonState>,
     Json(request): Json<StartIndexingRequest>,
 ) -> Json<serde_json::Value> {
+    // SEC-008: Input validation - check path length
+    if request.path.len() > MAX_PATH_LEN {
+        return Json(serde_json::json!({
+            "job_id": "",
+            "status": "error",
+            "message": format!("Path too long: {} bytes (max: {} bytes)", request.path.len(), MAX_PATH_LEN)
+        }));
+    }
+
+    // SEC-008: Input validation - prevent path traversal attacks
+    let path = std::path::Path::new(&request.path);
+    if request.path.contains("..") {
+        return Json(serde_json::json!({
+            "job_id": "",
+            "status": "error",
+            "message": "Path traversal not allowed (contains '..')"
+        }));
+    }
+
+    // SEC-008: Ensure path is absolute (security: prevent relative path confusion)
+    if !path.is_absolute() {
+        return Json(serde_json::json!({
+            "job_id": "",
+            "status": "error",
+            "message": "Path must be absolute"
+        }));
+    }
+
+    // SEC-008: Input validation - check extension count and lengths
+    if let Some(ref exts) = request.extensions {
+        if exts.len() > MAX_EXTENSIONS {
+            return Json(serde_json::json!({
+                "job_id": "",
+                "status": "error",
+                "message": format!("Too many extensions: {} (max: {})", exts.len(), MAX_EXTENSIONS)
+            }));
+        }
+        for ext in exts {
+            if ext.len() > 32 {
+                return Json(serde_json::json!({
+                    "job_id": "",
+                    "status": "error",
+                    "message": format!("Extension too long: '{}' (max: 32 chars)", ext)
+                }));
+            }
+        }
+    }
+
+    // SEC-008: Input validation - check exclude pattern count and lengths
+    if let Some(ref patterns) = request.exclude_patterns {
+        if patterns.len() > MAX_EXCLUDE_PATTERNS {
+            return Json(serde_json::json!({
+                "job_id": "",
+                "status": "error",
+                "message": format!("Too many exclude patterns: {} (max: {})", patterns.len(), MAX_EXCLUDE_PATTERNS)
+            }));
+        }
+        for pattern in patterns {
+            if pattern.len() > 256 {
+                return Json(serde_json::json!({
+                    "job_id": "",
+                    "status": "error",
+                    "message": format!("Exclude pattern too long: '{}' (max: 256 chars)", pattern)
+                }));
+            }
+        }
+    }
+
     let indexing_service = match &state.indexing_service {
         Some(svc) => svc,
         None => {
@@ -2792,12 +3110,16 @@ async fn list_indexing_jobs(
 }
 
 /// Search request for indexed code
-#[derive(Debug, Deserialize)]
+/// SEC-012: Validated with max query length
+#[derive(Debug, Deserialize, Validate)]
 struct SearchCodeRequest {
+    #[validate(length(min = 1, max = 1000, message = "Query must be 1-1000 characters"))]
     query: String,
     #[serde(default = "default_limit")]
+    #[validate(range(min = 1, max = 100, message = "Limit must be 1-100"))]
     limit: i32,
     #[serde(default)]
+    #[validate(length(max = 32, message = "Language must be at most 32 characters"))]
     language: Option<String>,
 }
 
@@ -2892,8 +3214,10 @@ async fn acp_status(State(state): State<DaemonState>) -> Json<serde_json::Value>
 }
 
 /// ACP disconnect request
-#[derive(Debug, Clone, Deserialize)]
+/// SEC-012: Validated with UUID format
+#[derive(Debug, Clone, Deserialize, Validate)]
 pub struct AcpDisconnectRequest {
+    #[validate(length(min = 36, max = 36, message = "Agent ID must be a valid UUID (36 characters)"))]
     pub agent_id: String,
 }
 
@@ -2948,10 +3272,14 @@ async fn acp_disconnect(
 }
 
 /// ACP send task request
-#[derive(Debug, Clone, Deserialize)]
+/// SEC-012: Validated with UUID format and max lengths
+#[derive(Debug, Clone, Deserialize, Validate)]
 pub struct AcpSendTaskRequest {
+    #[validate(length(min = 36, max = 36, message = "Agent ID must be a valid UUID (36 characters)"))]
     pub agent_id: String,
+    #[validate(length(min = 1, max = 100000, message = "Task must be 1-100000 characters"))]
     pub task: String,
+    #[validate(length(max = 100000, message = "Context must be at most 100000 characters"))]
     pub context: Option<String>,
 }
 
@@ -3020,8 +3348,10 @@ async fn acp_send_task(
 }
 
 /// Broadcast request
-#[derive(Debug, Clone, Deserialize)]
+/// SEC-012: Validated with max message length
+#[derive(Debug, Clone, Deserialize, Validate)]
 pub struct BroadcastRequest {
+    #[validate(length(min = 1, max = 10000, message = "Message must be 1-10000 characters"))]
     pub message: String,
 }
 
@@ -3262,8 +3592,10 @@ async fn rl_train(State(state): State<DaemonState>) -> Json<serde_json::Value> {
 }
 
 /// Set RL algorithm request
-#[derive(Debug, Clone, Deserialize)]
+/// SEC-012: Validated with max algorithm name length
+#[derive(Debug, Clone, Deserialize, Validate)]
 pub struct SetAlgorithmRequest {
+    #[validate(length(min = 1, max = 32, message = "Algorithm must be 1-32 characters"))]
     pub algorithm: String,
 }
 
@@ -3272,6 +3604,29 @@ async fn rl_set_algorithm(
     State(state): State<DaemonState>,
     Json(request): Json<SetAlgorithmRequest>,
 ) -> Json<serde_json::Value> {
+    // SEC-008: Input validation - check algorithm name length
+    if request.algorithm.len() > MAX_ALGORITHM_LEN {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": format!(
+                "Algorithm name too long: {} bytes (max: {} bytes)",
+                request.algorithm.len(), MAX_ALGORITHM_LEN
+            )
+        }));
+    }
+
+    // SEC-008: Input validation - validate algorithm against whitelist
+    let algorithm = request.algorithm.to_lowercase();
+    if !VALID_RL_ALGORITHMS.contains(&algorithm.as_str()) {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": format!(
+                "Invalid algorithm '{}'. Must be one of: {}",
+                request.algorithm, VALID_RL_ALGORITHMS.join(", ")
+            )
+        }));
+    }
+
     match state.rl_service.set_algorithm(&request.algorithm).await {
         Ok(()) => Json(serde_json::json!({
             "success": true,
@@ -3299,6 +3654,26 @@ async fn rl_set_params(
     State(state): State<DaemonState>,
     Json(params): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
+    // SEC-008: Input validation - check JSON params size
+    let params_str = params.to_string();
+    if params_str.len() > MAX_JSON_PARAMS_SIZE {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": format!(
+                "Parameters too large: {} bytes (max: {} bytes)",
+                params_str.len(), MAX_JSON_PARAMS_SIZE
+            )
+        }));
+    }
+
+    // SEC-008: Input validation - ensure params is an object (not array/primitive)
+    if !params.is_object() {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "Parameters must be a JSON object"
+        }));
+    }
+
     match state.rl_service.set_params(params).await {
         Ok(()) => Json(serde_json::json!({
             "success": true,
@@ -3314,10 +3689,13 @@ async fn rl_set_params(
 // Token Efficiency API handlers
 
 /// Analyze context request
-#[derive(Debug, Clone, Deserialize)]
+/// SEC-012: Validated with max content length
+#[derive(Debug, Clone, Deserialize, Validate)]
 pub struct AnalyzeContextRequest {
+    #[validate(length(min = 1, max = 1000000, message = "Content must be 1-1000000 characters"))]
     pub content: String,
     #[serde(default)]
+    #[validate(length(max = 36, message = "Agent ID must be at most 36 characters"))]
     pub agent_id: Option<String>,
 }
 
@@ -3352,14 +3730,18 @@ async fn tokens_analyze(
 }
 
 /// Compress context request
-#[derive(Debug, Clone, Deserialize)]
+/// SEC-012: Validated with max content length and reduction range
+#[derive(Debug, Clone, Deserialize, Validate)]
 pub struct CompressContextRequest {
+    #[validate(length(min = 1, max = 1000000, message = "Content must be 1-1000000 characters"))]
     pub content: String,
     #[serde(default)]
+    #[validate(length(max = 36, message = "Agent ID must be at most 36 characters"))]
     pub agent_id: Option<String>,
     #[serde(default = "default_compress")]
     pub compress_code: bool,
     #[serde(default)]
+    #[validate(range(min = 0.0, max = 1.0, message = "Target reduction must be 0.0-1.0"))]
     pub target_reduction: Option<f64>,
 }
 

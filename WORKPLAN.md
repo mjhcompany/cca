@@ -202,14 +202,14 @@
 - [ ] Chaos testing
 
 ### 6.2 Documentation
-- [ ] User guide
-- [ ] API reference
-- [ ] Architecture docs
+- [x] User guide (updated with tmux workflow, version fixes)
+- [x] API reference (HTTP API documented in user-guide.md)
+- [x] Architecture docs (docs/architecture.md)
 
 ### 6.3 Packaging
-- [ ] Binary releases
-- [ ] Docker image
-- [ ] Homebrew formula
+- [x] Binary releases (GitHub Actions release workflow)
+- [x] Docker image (multi-stage Dockerfile)
+- [x] Homebrew formula (auto-generated in release workflow)
 
 ### 6.4 Performance
 - [ ] Profiling
@@ -225,10 +225,10 @@
 **Goal**: Clean, idiomatic Rust code with zero warnings
 
 ### 7.1 Clippy Linting
-- [ ] Fix all clippy warnings (pedantic level)
-- [ ] Address dead code warnings
-- [ ] Fix unused imports and variables
-- [ ] Resolve type complexity warnings
+- [x] Fix all clippy warnings (pedantic level) - passes cleanly
+- [x] Address dead code warnings
+- [x] Fix unused imports and variables
+- [x] Resolve type complexity warnings
 
 ### 7.2 Code Refactoring
 - [ ] Remove duplicate code patterns
@@ -243,10 +243,10 @@
 - [ ] Add proper documentation comments
 
 ### 7.4 Dependency Audit
-- [ ] Remove unused dependencies
-- [ ] Update outdated crates
-- [ ] Check for security advisories
-- [ ] Optimize feature flags
+- [x] Remove unused dependencies
+- [x] Update outdated crates
+- [x] Check for security advisories (cargo audit - 1 warning, 0 CVEs)
+- [x] Optimize feature flags
 
 **Milestone**: Zero warnings, clean `cargo clippy -- -W clippy::pedantic`
 
@@ -275,10 +275,11 @@
 - [ ] Verify dependency licenses
 
 ### 8.4 Hardening
-- [ ] Add rate limiting
-- [ ] Implement request validation
-- [ ] Add security headers
-- [ ] Configure proper timeouts
+- [x] Add rate limiting (in auth.rs)
+- [x] Implement request validation (input length limits, UUID validation)
+- [x] Add security headers (12 headers added via middleware)
+- [x] Configure proper timeouts
+- [x] Add global body size limit (2MB via DefaultBodyLimit)
 
 **Milestone**: Security-reviewed, production-hardened codebase
 
@@ -292,7 +293,7 @@
 | PTY | portable-pty | `portable-pty` |
 | WebSocket | Tungstenite | `tokio-tungstenite` |
 | Redis | deadpool-redis | `deadpool-redis` |
-| PostgreSQL | sqlx + pg17 | `sqlx` (pg17 via pgvector) |
+| PostgreSQL | sqlx + pg18 | `sqlx` (pg18 via pgvector) |
 | Vector Search | pgvector | `pgvector` (1536-dim embeddings) |
 | Serialization | serde | `serde`, `serde_json` |
 | CLI | clap | `clap` |
@@ -300,7 +301,7 @@
 | Logging | tracing | `tracing`, `tracing-subscriber` |
 | Metrics | prometheus | `prometheus` |
 
-**Note**: Uses PostgreSQL 17 (latest stable with pgvector). When pg18 becomes stable with pgvector support, update `docker-compose.yml`.
+**Note**: Uses PostgreSQL 18 (latest stable with pgvector support).
 
 ---
 

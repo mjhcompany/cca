@@ -1,12 +1,13 @@
-# CCA Daemon Production Dockerfile
-# Multi-stage build for minimal runtime image
+# Multi-stage Dockerfile for CCA (Claude Code Agent)
+# Build stage: Compile all Rust binaries in release mode
+# Runtime stage: Minimal Debian image with compiled binaries
 
 # =============================================================================
 # Stage 1: Builder
 # =============================================================================
-FROM rust:1.75-bookworm AS builder
+FROM rust:1.81 AS builder
 
-# Install build dependencies
+# Install build dependencies for tree-sitter and other native libs
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
@@ -24,17 +25,17 @@ COPY crates/cca-acp/Cargo.toml crates/cca-acp/
 COPY crates/cca-rl/Cargo.toml crates/cca-rl/
 COPY tests/chaos/Cargo.toml tests/chaos/
 
-# Create dummy source files to build dependencies
+# Create dummy source files to build dependencies (for better layer caching)
 RUN mkdir -p crates/cca-core/src && echo "pub fn dummy() {}" > crates/cca-core/src/lib.rs && \
     mkdir -p crates/cca-daemon/src && echo "fn main() {}" > crates/cca-daemon/src/main.rs && \
     mkdir -p crates/cca-cli/src && echo "fn main() {}" > crates/cca-cli/src/main.rs && \
-    mkdir -p crates/cca-mcp/src && echo "pub fn dummy() {}" > crates/cca-mcp/src/lib.rs && \
+    mkdir -p crates/cca-mcp/src && echo "fn main() {}" > crates/cca-mcp/src/main.rs && \
     mkdir -p crates/cca-acp/src && echo "pub fn dummy() {}" > crates/cca-acp/src/lib.rs && \
     mkdir -p crates/cca-rl/src && echo "pub fn dummy() {}" > crates/cca-rl/src/lib.rs && \
     mkdir -p tests/chaos/src && echo "fn main() {}" > tests/chaos/src/main.rs
 
 # Build dependencies only (this layer will be cached)
-RUN cargo build --release --bin ccad 2>/dev/null || true
+RUN cargo build --release --bin ccad --bin cca --bin cca-mcp 2>/dev/null || true
 
 # Remove dummy source files
 RUN rm -rf crates/*/src tests/chaos/src
@@ -43,10 +44,11 @@ RUN rm -rf crates/*/src tests/chaos/src
 COPY crates crates/
 COPY migrations migrations/
 
-# Build the actual binary
-ARG VERSION=0.0.0
-RUN cargo build --release --locked --bin ccad && \
-    strip target/release/ccad
+# Build all binaries in release mode
+RUN cargo build --release --locked \
+    --bin ccad \
+    --bin cca \
+    --bin cca-mcp
 
 # =============================================================================
 # Stage 2: Runtime
@@ -57,41 +59,45 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd -r -s /bin/false -U cca
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy the binary from builder
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash cca
+
+# Copy binaries from builder stage
 COPY --from=builder /build/target/release/ccad /usr/local/bin/ccad
+COPY --from=builder /build/target/release/cca /usr/local/bin/cca
+COPY --from=builder /build/target/release/cca-mcp /usr/local/bin/cca-mcp
+
+# Ensure binaries are executable
+RUN chmod +x /usr/local/bin/ccad /usr/local/bin/cca /usr/local/bin/cca-mcp
 
 # Copy migrations for runtime database setup
 COPY --from=builder /build/migrations /opt/cca/migrations
 
 # Create directories for runtime data
-RUN mkdir -p /var/lib/cca /var/log/cca /etc/cca && \
-    chown -R cca:cca /var/lib/cca /var/log/cca /etc/cca
+RUN mkdir -p /var/lib/cca /var/log/cca /etc/cca \
+    && chown -R cca:cca /var/lib/cca /var/log/cca /etc/cca /opt/cca
 
-# Default configuration (can be overridden with environment variables)
-ENV CCA__DAEMON__BIND_ADDRESS=0.0.0.0:9200 \
-    CCA__DAEMON__WS_ADDRESS=0.0.0.0:9100 \
-    CCA__DAEMON__LOG_LEVEL=info \
-    CCA__DAEMON__DATA_DIR=/var/lib/cca \
-    RUST_LOG=info
+# Switch to non-root user
+USER cca
+WORKDIR /home/cca
 
 # Expose ports
-# HTTP API
-EXPOSE 9200
-# WebSocket (ACP)
-EXPOSE 9100
+# 8580: HTTP API
+# 8581: ACP WebSocket
+EXPOSE 8580 8581
 
-# Health check
+# Health check - verify daemon is responding
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:9200/health || exit 1
+    CMD curl -f http://localhost:8580/health || exit 1
 
-# Run as non-root user
-USER cca
+# Set environment defaults
+ENV RUST_LOG=info \
+    CCA_HTTP_PORT=8580 \
+    CCA_ACP_PORT=8581 \
+    CCA_DATA_DIR=/var/lib/cca
 
-# Set the entrypoint
-ENTRYPOINT ["/usr/local/bin/ccad"]
-
-# Default command (can be overridden)
-CMD []
+# Run the daemon
+ENTRYPOINT ["ccad"]

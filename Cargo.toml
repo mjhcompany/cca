@@ -65,7 +65,10 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 # HTTP/API
 axum = "0.7"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "set-header", "limit"] }
+
+# Validation
+validator = { version = "0.19", features = ["derive"] }
 
 # Metrics
 prometheus = "0.14"

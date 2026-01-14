@@ -40,11 +40,11 @@ pub struct DaemonConfig {
     pub bind_address: String,
     pub log_level: String,
     pub max_agents: usize,
-    /// API keys for authentication (set via CCA__DAEMON__API_KEYS as comma-separated list)
+    /// API keys for authentication (set via `CCA__DAEMON__API_KEYS` as comma-separated list)
     /// These are legacy keys with no role restrictions
     #[serde(default, deserialize_with = "deserialize_api_keys")]
     pub api_keys: Vec<String>,
-    /// API keys with role-based permissions (preferred over api_keys)
+    /// API keys with role-based permissions (preferred over `api_keys`)
     /// Configure via config file for role restrictions
     #[serde(default)]
     pub api_key_configs: Vec<ApiKeyConfig>,
@@ -58,31 +58,31 @@ pub struct DaemonConfig {
     /// SEC-004: Per-IP rate limiting for DoS protection
     pub rate_limit_rps: u32,
     /// Rate limit burst size: max requests allowed in a burst before limiting kicks in
-    /// SEC-004: Allows short bursts while maintaining average rate
+    /// `SEC-004`: Allows short bursts while maintaining average rate
     pub rate_limit_burst: u32,
-    /// Global rate limit: total requests per second across all IPs (0 = disabled)
-    /// SEC-004: Absolute limit to prevent distributed DoS
+    /// Global rate limit: total requests per second across all IPs (`0` = disabled)
+    /// `SEC-004`: Absolute limit to prevent distributed DoS
     pub rate_limit_global_rps: u32,
-    /// Whether to trust X-Forwarded-For header for client IP (only enable behind trusted proxy)
-    /// SEC-004: SECURITY WARNING - enabling this behind untrusted proxies allows IP spoofing
+    /// Whether to trust `X-Forwarded-For` header for client IP (only enable behind trusted proxy)
+    /// `SEC-004`: SECURITY WARNING - enabling this behind untrusted proxies allows IP spoofing
     pub rate_limit_trust_proxy: bool,
-    /// Rate limit: requests per second per API key (0 = disabled)
-    /// SEC-004: Per-API-key rate limiting for authenticated clients
+    /// Rate limit: requests per second per API key (`0` = disabled)
+    /// `SEC-004`: Per-API-key rate limiting for authenticated clients
     pub rate_limit_api_key_rps: u32,
     /// Rate limit burst size for API key rate limiting
-    /// SEC-004: Allows short bursts for authenticated clients
+    /// `SEC-004`: Allows short bursts for authenticated clients
     pub rate_limit_api_key_burst: u32,
-    /// SEC-010: CORS allowed origins (comma-separated list or array)
+    /// `SEC-010`: CORS allowed origins (comma-separated list or array)
     /// Empty list means CORS is disabled (no cross-origin requests allowed)
-    /// Use "*" for development only - NEVER in production
-    /// Example: "https://app.example.com,https://admin.example.com"
-    /// Set via CCA__DAEMON__CORS_ORIGINS environment variable
+    /// Use `"*"` for development only - NEVER in production
+    /// Example: `"https://app.example.com,https://admin.example.com"`
+    /// Set via `CCA__DAEMON__CORS_ORIGINS` environment variable
     #[serde(default, deserialize_with = "deserialize_cors_origins")]
     pub cors_origins: Vec<String>,
-    /// SEC-010: Whether to allow credentials in CORS requests
-    /// Only set to true if cors_origins contains explicit origins (not "*")
+    /// `SEC-010`: Whether to allow credentials in CORS requests
+    /// Only set to true if `cors_origins` contains explicit origins (not `"*"`)
     pub cors_allow_credentials: bool,
-    /// SEC-010: Max age in seconds for CORS preflight cache (default: 3600 = 1 hour)
+    /// `SEC-010`: Max age in seconds for CORS preflight cache (default: 3600 = 1 hour)
     pub cors_max_age_secs: u64,
 }
 
@@ -166,8 +166,9 @@ impl Default for DaemonConfig {
 impl DaemonConfig {
     /// Returns whether authentication is required.
     /// SECURITY: In production builds (without "dev" feature), this ALWAYS returns true.
-    /// The require_auth config option is only respected in dev builds.
+    /// The `require_auth` config option is only respected in dev builds.
     #[inline]
+    #[allow(clippy::unused_self)]  // self is used in dev builds
     pub fn is_auth_required(&self) -> bool {
         #[cfg(feature = "dev")]
         {
@@ -250,13 +251,13 @@ pub struct PostgresConfig {
     pub url: String,
     pub pool_size: u32,
     pub max_connections: u32,
-    /// Statement timeout in milliseconds for PostgreSQL queries (STAB-004)
-    /// This is set via the statement_timeout connection parameter
-    /// Set via CCA__POSTGRES__STATEMENT_TIMEOUT_MS environment variable
+    /// Statement timeout in milliseconds for PostgreSQL queries (`STAB-004`)
+    /// This is set via the `statement_timeout` connection parameter
+    /// Set via `CCA__POSTGRES__STATEMENT_TIMEOUT_MS` environment variable
     pub statement_timeout_ms: u64,
-    /// Query timeout in seconds for application-level timeout (STAB-004)
-    /// This wraps queries with tokio::time::timeout as a safety net
-    /// Set via CCA__POSTGRES__QUERY_TIMEOUT_SECS environment variable
+    /// Query timeout in seconds for application-level timeout (`STAB-004`)
+    /// This wraps queries with `tokio::time::timeout` as a safety net
+    /// Set via `CCA__POSTGRES__QUERY_TIMEOUT_SECS` environment variable
     pub query_timeout_secs: u64,
 }
 
@@ -284,10 +285,10 @@ pub struct AgentsConfig {
     pub context_compression: bool,
     pub token_budget_per_task: u64,
     /// Path to the Claude Code binary (defaults to "claude" which must be in PATH)
-    /// Set via CCA__AGENTS__CLAUDE_PATH environment variable if claude is not in PATH
+    /// Set via `CCA__AGENTS__CLAUDE_PATH` environment variable if claude is not in PATH
     pub claude_path: String,
-    /// SEC-007: Permission configuration for Claude Code invocations
-    /// Controls how agent permissions are handled instead of blanket --dangerously-skip-permissions
+    /// `SEC-007`: Permission configuration for Claude Code invocations
+    /// Controls how agent permissions are handled instead of blanket `--dangerously-skip-permissions`
     pub permissions: PermissionsConfig,
 }
 
@@ -319,15 +320,15 @@ where
     }
 }
 
-/// Role-specific permission overrides for SEC-007
+/// Role-specific permission overrides for `SEC-007`
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct RolePermissions {
-    /// Override allowed_tools for this role (if set, replaces default)
+    /// Override `allowed_tools` for this role (if set, replaces default)
     #[serde(default, deserialize_with = "deserialize_tool_list")]
     pub allowed_tools: Vec<String>,
 
-    /// Additional denied tools for this role (merged with global denied_tools)
+    /// Additional denied tools for this role (merged with global `denied_tools`)
     #[serde(default, deserialize_with = "deserialize_tool_list")]
     pub denied_tools: Vec<String>,
 
@@ -335,36 +336,36 @@ pub struct RolePermissions {
     pub mode: Option<String>,
 }
 
-/// SEC-007: Permission configuration for Claude Code invocations
-/// Replaces blanket --dangerously-skip-permissions with granular control
+/// `SEC-007`: Permission configuration for Claude Code invocations
+/// Replaces blanket `--dangerously-skip-permissions` with granular control
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct PermissionsConfig {
     /// Permission mode: "allowlist" (default, secure), "sandbox", or "dangerous" (legacy)
-    /// - allowlist: Uses --allowedTools with configured tool list (recommended)
+    /// - allowlist: Uses `--allowedTools` with configured tool list (recommended)
     /// - sandbox: Expects external sandboxing (container/VM), uses minimal permissions
-    /// - dangerous: Uses --dangerously-skip-permissions (NOT RECOMMENDED, legacy only)
+    /// - dangerous: Uses `--dangerously-skip-permissions` (NOT RECOMMENDED, legacy only)
     pub mode: String,
 
     /// Tools allowed without prompting when mode is "allowlist"
-    /// Examples: "Read", "Write(src/**)", "Bash(git *)", "Bash(npm *)"
-    /// Set via CCA__AGENTS__PERMISSIONS__ALLOWED_TOOLS as comma-separated list
+    /// Examples: "Read", "Write(src/\*\*)", "Bash(git \*)", "Bash(npm \*)"
+    /// Set via `CCA__AGENTS__PERMISSIONS__ALLOWED_TOOLS` as comma-separated list
     #[serde(default, deserialize_with = "deserialize_tool_list")]
     pub allowed_tools: Vec<String>,
 
     /// Tools explicitly denied (blocklist) - applied in all modes except "dangerous"
-    /// Examples: "Bash(rm -rf *)", "Bash(sudo *)", "Write(.env*)"
-    /// Set via CCA__AGENTS__PERMISSIONS__DENIED_TOOLS as comma-separated list
+    /// Examples: "Bash(rm -rf \*)", "Bash(sudo \*)", "Write(.env\*)"
+    /// Set via `CCA__AGENTS__PERMISSIONS__DENIED_TOOLS` as comma-separated list
     #[serde(default, deserialize_with = "deserialize_tool_list")]
     pub denied_tools: Vec<String>,
 
     /// Working directory restriction - agents can only access files under this path
     /// Empty means current working directory (most restrictive)
-    /// Set via CCA__AGENTS__PERMISSIONS__WORKING_DIR
+    /// Set via `CCA__AGENTS__PERMISSIONS__WORKING_DIR`
     pub working_dir: String,
 
     /// Whether to allow network access in Bash commands
-    /// When false, adds Bash(curl*), Bash(wget*), etc. to denied_tools automatically
+    /// When false, adds `Bash(curl*)`, `Bash(wget*)`, etc. to `denied_tools` automatically
     pub allow_network: bool,
 
     /// Role-specific permission overrides
@@ -542,7 +543,7 @@ impl Default for LearningConfig {
 pub struct EmbeddingsConfig {
     /// Whether embeddings are enabled
     pub enabled: bool,
-    /// Ollama API base URL (e.g., "http://192.168.33.218:11434")
+    /// Ollama API base URL (e.g., `"http://192.168.33.218:11434"`)
     pub ollama_url: String,
     /// Model name for embeddings (e.g., "nomic-embed-text:latest")
     pub model: String,

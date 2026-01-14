@@ -3,8 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -20,47 +19,44 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  BINARY_NAME: ccad
 
 permissions:
   contents: write
 
 jobs:
   build:
-    name: Build - ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    name: Build - ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux targets
+          # Linux x86_64
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            runner: ubuntu-latest
+            os: linux
+            arch: x86_64
             cross: false
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-            cross: true
+
+          # Linux ARM64
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            cross: true
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
+            runner: ubuntu-latest
+            os: linux
+            arch: arm64
             cross: true
 
-          # macOS targets
+          # macOS x86_64
           - target: x86_64-apple-darwin
-            os: macos-13
-            cross: false
-          - target: aarch64-apple-darwin
-            os: macos-14
+            runner: macos-13
+            os: macos
+            arch: x86_64
             cross: false
 
-          # Windows targets
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            cross: false
-          - target: aarch64-pc-windows-msvc
-            os: windows-latest
+          # macOS ARM64
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            os: macos
+            arch: arm64
             cross: false
 
     steps:
@@ -80,7 +76,7 @@ jobs:
           echo "version_num=${VERSION#v}" >> $GITHUB_OUTPUT
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
@@ -88,53 +84,51 @@ jobs:
         if: matrix.cross
         uses: taiki-e/install-action@cross
 
-      - name: Install musl-tools (Linux musl)
-        if: matrix.target == 'x86_64-unknown-linux-musl' && !matrix.cross
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
-      - name: Build binary
+      - name: Build binaries
         shell: bash
         run: |
           if [ "${{ matrix.cross }}" == "true" ]; then
-            cross build --release --locked --target ${{ matrix.target }} --bin ${{ env.BINARY_NAME }}
+            cross build --release --locked --target ${{ matrix.target }} --bin cca --bin ccad
           else
-            cargo build --release --locked --target ${{ matrix.target }} --bin ${{ env.BINARY_NAME }}
+            cargo build --release --locked --target ${{ matrix.target }} --bin cca --bin ccad
           fi
 
-      - name: Prepare artifacts (Unix)
-        if: runner.os != 'Windows'
+      - name: Prepare artifacts
         shell: bash
         run: |
-          ARTIFACT_DIR="cca-${{ steps.version.outputs.version }}-${{ matrix.target }}"
-          mkdir -p "${ARTIFACT_DIR}"
-          cp "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}" "${ARTIFACT_DIR}/"
-          cp README.md LICENSE* "${ARTIFACT_DIR}/" 2>/dev/null || true
-          cp -r docs "${ARTIFACT_DIR}/" 2>/dev/null || true
-          tar -czvf "${ARTIFACT_DIR}.tar.gz" "${ARTIFACT_DIR}"
-          echo "ARTIFACT=${ARTIFACT_DIR}.tar.gz" >> $GITHUB_ENV
+          VERSION="${{ steps.version.outputs.version }}"
+          ARTIFACT_NAME="cca-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
 
-      - name: Prepare artifacts (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ARTIFACT_DIR = "cca-${{ steps.version.outputs.version }}-${{ matrix.target }}"
-          New-Item -ItemType Directory -Path $ARTIFACT_DIR -Force
-          Copy-Item "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}.exe" $ARTIFACT_DIR/
-          Copy-Item README.md, LICENSE* $ARTIFACT_DIR/ -ErrorAction SilentlyContinue
-          Copy-Item -Recurse docs $ARTIFACT_DIR/ -ErrorAction SilentlyContinue
-          Compress-Archive -Path $ARTIFACT_DIR -DestinationPath "$ARTIFACT_DIR.zip"
-          echo "ARTIFACT=$ARTIFACT_DIR.zip" >> $env:GITHUB_ENV
+          mkdir -p "${ARTIFACT_NAME}"
+
+          # Copy binaries
+          cp "target/${{ matrix.target }}/release/cca" "${ARTIFACT_NAME}/"
+          cp "target/${{ matrix.target }}/release/ccad" "${ARTIFACT_NAME}/"
+
+          # Copy documentation
+          cp README.md "${ARTIFACT_NAME}/" 2>/dev/null || true
+          cp LICENSE* "${ARTIFACT_NAME}/" 2>/dev/null || true
+
+          # Create tarball
+          tar -czvf "${ARTIFACT_NAME}.tar.gz" "${ARTIFACT_NAME}"
+
+          # Generate checksum for this artifact
+          sha256sum "${ARTIFACT_NAME}.tar.gz" > "${ARTIFACT_NAME}.tar.gz.sha256"
+
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cca-${{ matrix.target }}
-          path: ${{ env.ARTIFACT }}
+          name: ${{ env.ARTIFACT_NAME }}
+          path: |
+            ${{ env.ARTIFACT_NAME }}.tar.gz
+            ${{ env.ARTIFACT_NAME }}.tar.gz.sha256
           if-no-files-found: error
 
   build-docker:
@@ -228,42 +222,80 @@ jobs:
         with:
           path: artifacts
 
-      - name: List artifacts
-        run: find artifacts -type f
-
-      - name: Generate checksums
+      - name: Prepare release assets
         run: |
           cd artifacts
-          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec mv {} . \;
-          sha256sum *.tar.gz *.zip > SHA256SUMS.txt 2>/dev/null || true
-          cat SHA256SUMS.txt
+
+          # Move all files to current directory
+          find . -type f \( -name "*.tar.gz" -o -name "*.sha256" \) -exec mv {} . \;
+
+          # Create combined SHA256SUMS.txt
+          echo "# SHA256 Checksums for CCA ${{ steps.version.outputs.version }}" > SHA256SUMS.txt
+          echo "" >> SHA256SUMS.txt
+          cat *.sha256 >> SHA256SUMS.txt
+
+          # List final artifacts
+          echo "Release artifacts:"
+          ls -la *.tar.gz SHA256SUMS.txt
 
       - name: Generate release notes
         id: release_notes
         run: |
+          VERSION="${{ steps.version.outputs.version }}"
           cat << 'EOF' > release_notes.md
           ## CCA ${{ steps.version.outputs.version }}
 
+          Claude Code Agent - AI-powered multi-agent orchestration system.
+
+          ### Downloads
+
+          | Platform | Architecture | Download |
+          |----------|--------------|----------|
+          | Linux | x86_64 | `cca-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz` |
+          | Linux | ARM64 | `cca-${{ steps.version.outputs.version }}-linux-arm64.tar.gz` |
+          | macOS | x86_64 | `cca-${{ steps.version.outputs.version }}-macos-x86_64.tar.gz` |
+          | macOS | ARM64 | `cca-${{ steps.version.outputs.version }}-macos-arm64.tar.gz` |
+
           ### Installation
 
-          #### Binary Downloads
-          Download the appropriate binary for your platform from the assets below.
+          #### Binary Download
+
+          ```bash
+          # Download and extract (example for Linux x86_64)
+          curl -LO https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/cca-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz
+          tar -xzf cca-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz
+          sudo mv cca-${{ steps.version.outputs.version }}-linux-x86_64/cca /usr/local/bin/
+          sudo mv cca-${{ steps.version.outputs.version }}-linux-x86_64/ccad /usr/local/bin/
+          ```
 
           #### Docker
+
           ```bash
           docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
           ```
 
-          #### Homebrew (macOS)
+          #### Homebrew (macOS/Linux)
+
           ```bash
           brew tap ${{ github.repository_owner }}/cca
           brew install cca
           ```
 
-          ### Checksums
-          Verify your download with the SHA256SUMS.txt file.
+          ### Verify Downloads
+
+          Download `SHA256SUMS.txt` and verify your download:
+
+          ```bash
+          sha256sum -c SHA256SUMS.txt --ignore-missing
+          ```
+
+          ### Binaries Included
+
+          - `cca` - CLI client for interacting with the CCA daemon
+          - `ccad` - CCA daemon (orchestration service)
 
           ### Changelog
+
           See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/master/CHANGELOG.md) for details.
           EOF
 
@@ -277,7 +309,6 @@ jobs:
           prerelease: ${{ contains(steps.version.outputs.version, '-') }}
           files: |
             artifacts/*.tar.gz
-            artifacts/*.zip
             artifacts/SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -302,22 +333,32 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "version_num=${VERSION#v}" >> $GITHUB_OUTPUT
 
-      - name: Download release artifacts for SHA
+      - name: Download SHA256SUMS
         run: |
-          # Download the macOS ARM64 tarball to compute SHA
-          curl -sL "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/cca-${{ steps.version.outputs.version }}-aarch64-apple-darwin.tar.gz" -o mac-arm64.tar.gz
-          curl -sL "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/cca-${{ steps.version.outputs.version }}-x86_64-apple-darwin.tar.gz" -o mac-x64.tar.gz
-          curl -sL "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/cca-${{ steps.version.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz" -o linux-x64.tar.gz
-          curl -sL "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/cca-${{ steps.version.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz" -o linux-arm64.tar.gz
+          curl -sL "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/SHA256SUMS.txt" -o SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
-          echo "SHA_MAC_ARM64=$(sha256sum mac-arm64.tar.gz | cut -d' ' -f1)" >> $GITHUB_ENV
-          echo "SHA_MAC_X64=$(sha256sum mac-x64.tar.gz | cut -d' ' -f1)" >> $GITHUB_ENV
-          echo "SHA_LINUX_X64=$(sha256sum linux-x64.tar.gz | cut -d' ' -f1)" >> $GITHUB_ENV
-          echo "SHA_LINUX_ARM64=$(sha256sum linux-arm64.tar.gz | cut -d' ' -f1)" >> $GITHUB_ENV
+      - name: Extract checksums
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          SHA_LINUX_X64=$(grep "linux-x86_64.tar.gz" SHA256SUMS.txt | awk '{print $1}')
+          SHA_LINUX_ARM64=$(grep "linux-arm64.tar.gz" SHA256SUMS.txt | awk '{print $1}')
+          SHA_MAC_X64=$(grep "macos-x86_64.tar.gz" SHA256SUMS.txt | awk '{print $1}')
+          SHA_MAC_ARM64=$(grep "macos-arm64.tar.gz" SHA256SUMS.txt | awk '{print $1}')
+
+          echo "SHA_LINUX_X64=${SHA_LINUX_X64}" >> $GITHUB_ENV
+          echo "SHA_LINUX_ARM64=${SHA_LINUX_ARM64}" >> $GITHUB_ENV
+          echo "SHA_MAC_X64=${SHA_MAC_X64}" >> $GITHUB_ENV
+          echo "SHA_MAC_ARM64=${SHA_MAC_ARM64}" >> $GITHUB_ENV
+
+      - name: Create Formula directory
+        run: mkdir -p Formula
 
       - name: Update Homebrew formula
         run: |
           VERSION="${{ steps.version.outputs.version_num }}"
+          VERSION_TAG="${{ steps.version.outputs.version }}"
           REPO="${{ github.repository }}"
 
           cat > Formula/cca.rb << EOF
@@ -329,48 +370,53 @@ jobs:
 
             on_macos do
               on_arm do
-                url "https://github.com/${REPO}/releases/download/v${VERSION}/cca-v${VERSION}-aarch64-apple-darwin.tar.gz"
+                url "https://github.com/${REPO}/releases/download/${VERSION_TAG}/cca-${VERSION_TAG}-macos-arm64.tar.gz"
                 sha256 "${SHA_MAC_ARM64}"
               end
               on_intel do
-                url "https://github.com/${REPO}/releases/download/v${VERSION}/cca-v${VERSION}-x86_64-apple-darwin.tar.gz"
+                url "https://github.com/${REPO}/releases/download/${VERSION_TAG}/cca-${VERSION_TAG}-macos-x86_64.tar.gz"
                 sha256 "${SHA_MAC_X64}"
               end
             end
 
             on_linux do
               on_arm do
-                url "https://github.com/${REPO}/releases/download/v${VERSION}/cca-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
+                url "https://github.com/${REPO}/releases/download/${VERSION_TAG}/cca-${VERSION_TAG}-linux-arm64.tar.gz"
                 sha256 "${SHA_LINUX_ARM64}"
               end
               on_intel do
-                url "https://github.com/${REPO}/releases/download/v${VERSION}/cca-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+                url "https://github.com/${REPO}/releases/download/${VERSION_TAG}/cca-${VERSION_TAG}-linux-x86_64.tar.gz"
                 sha256 "${SHA_LINUX_X64}"
               end
             end
 
             def install
+              bin.install "cca"
               bin.install "ccad"
             end
 
             def caveats
               <<~EOS
-                CCA daemon has been installed.
+                CCA has been installed.
+
+                Binaries installed:
+                  cca   - CLI client
+                  ccad  - Daemon (orchestration service)
 
                 To start the daemon:
                   ccad
 
                 For configuration options:
                   ccad --help
+                  cca --help
 
                 CCA requires Redis and PostgreSQL (with pgvector extension).
-                You can start them with Docker:
-                  docker compose -f /path/to/cca/docker-compose.yml up -d
               EOS
             end
 
             test do
-              assert_match "cca-daemon", shell_output("#{bin}/ccad --version")
+              assert_match "cca", shell_output("#{bin}/cca --version")
+              assert_match "ccad", shell_output("#{bin}/ccad --version")
             end
           end
           EOF

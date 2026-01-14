@@ -24,7 +24,7 @@ pub enum CodeLanguage {
 
 impl CodeLanguage {
     /// Get the language name as a string
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             CodeLanguage::Rust => "rust",
             CodeLanguage::Python => "python",
@@ -53,7 +53,7 @@ impl CodeLanguage {
     }
 
     /// Get tree-sitter language
-    fn tree_sitter_language(&self) -> tree_sitter::Language {
+    fn tree_sitter_language(self) -> tree_sitter::Language {
         match self {
             CodeLanguage::Rust => tree_sitter_rust::LANGUAGE.into(),
             CodeLanguage::Python => tree_sitter_python::LANGUAGE.into(),
@@ -178,7 +178,7 @@ impl CodeParser {
         let root_node = tree.root_node();
         let mut chunks = Vec::new();
 
-        self.extract_chunks(
+        Self::extract_chunks(
             &root_node,
             content.as_bytes(),
             language,
@@ -198,7 +198,6 @@ impl CodeParser {
 
     /// Extract chunks from AST node recursively
     fn extract_chunks(
-        &self,
         node: &tree_sitter::Node,
         source: &[u8],
         language: CodeLanguage,
@@ -206,37 +205,39 @@ impl CodeParser {
         chunks: &mut Vec<CodeChunk>,
     ) {
         // Check if this node is a chunk we want to extract
-        if let Some(chunk) = self.node_to_chunk(node, source, language, file_path) {
+        if let Some(chunk) = Self::node_to_chunk(node, source, language, file_path) {
             chunks.push(chunk);
         }
 
         // Recurse into children
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            self.extract_chunks(&child, source, language, file_path, chunks);
+            Self::extract_chunks(&child, source, language, file_path, chunks);
         }
     }
 
     /// Convert an AST node to a code chunk if applicable
     fn node_to_chunk(
-        &self,
         node: &tree_sitter::Node,
         source: &[u8],
         language: CodeLanguage,
         file_path: &str,
     ) -> Option<CodeChunk> {
-        let chunk_type = self.get_chunk_type(node.kind(), language)?;
-        let name = self.extract_name(node, source, language)?;
+        let chunk_type = Self::get_chunk_type(node.kind(), language)?;
+        let name = Self::extract_name(node, source, language)?;
 
         let content = node.utf8_text(source).ok()?.to_string();
-        let signature = self.extract_signature(node, source, language);
+        let signature = Self::extract_signature(node, source, language);
 
         // Skip very small chunks (likely not meaningful)
         if content.len() < 20 {
             return None;
         }
 
+        // Line numbers in practice won't exceed u32::MAX, safe to truncate
+        #[allow(clippy::cast_possible_truncation)]
         let start_line = node.start_position().row as u32 + 1;
+        #[allow(clippy::cast_possible_truncation)]
         let end_line = node.end_position().row as u32 + 1;
 
         let metadata = serde_json::json!({
@@ -257,8 +258,8 @@ impl CodeParser {
         })
     }
 
-    /// Map tree-sitter node kind to ChunkType
-    fn get_chunk_type(&self, kind: &str, language: CodeLanguage) -> Option<ChunkType> {
+    /// Map tree-sitter node kind to `ChunkType`
+    fn get_chunk_type(kind: &str, language: CodeLanguage) -> Option<ChunkType> {
         match language {
             CodeLanguage::Rust => match kind {
                 "function_item" => Some(ChunkType::Function),
@@ -275,8 +276,7 @@ impl CodeParser {
                 _ => None,
             },
             CodeLanguage::JavaScript | CodeLanguage::TypeScript => match kind {
-                "function_declaration" => Some(ChunkType::Function),
-                "arrow_function" => Some(ChunkType::Function),
+                "function_declaration" | "arrow_function" => Some(ChunkType::Function),
                 "method_definition" => Some(ChunkType::Method),
                 "class_declaration" => Some(ChunkType::Class),
                 "interface_declaration" => Some(ChunkType::Interface),
@@ -313,7 +313,6 @@ impl CodeParser {
 
     /// Extract the name of a code element
     fn extract_name(
-        &self,
         node: &tree_sitter::Node,
         source: &[u8],
         language: CodeLanguage,
@@ -329,8 +328,7 @@ impl CodeParser {
                 _ => return None,
             },
             CodeLanguage::JavaScript | CodeLanguage::TypeScript => match node.kind() {
-                "function_declaration" | "class_declaration" | "interface_declaration" => "name",
-                "method_definition" => "name",
+                "function_declaration" | "class_declaration" | "interface_declaration" | "method_definition" => "name",
                 "arrow_function" => {
                     // Arrow functions might be assigned to a variable
                     if let Some(parent) = node.parent() {
@@ -401,7 +399,6 @@ impl CodeParser {
 
     /// Extract function/method signature
     fn extract_signature(
-        &self,
         node: &tree_sitter::Node,
         source: &[u8],
         language: CodeLanguage,

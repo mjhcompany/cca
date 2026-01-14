@@ -1,0 +1,41 @@
+# Build artifacts
+target/
+*.rs.bk
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Documentation (not needed in image)
+docs/
+*.md
+!README.md
+
+# Tests (not needed in runtime image)
+tests/
+benches/
+
+# Local config
+.env
+.env.*
+cca.toml
+*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp

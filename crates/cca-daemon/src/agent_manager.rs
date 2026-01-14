@@ -24,8 +24,8 @@ use cca_core::util::{safe_truncate, safe_truncate_with_ellipsis};
 
 use crate::config::{Config, PermissionsConfig};
 
-/// SEC-007: Apply permission configuration to a tokio Command
-/// This replaces the blanket --dangerously-skip-permissions with granular control
+/// `SEC-007`: Apply permission configuration to a tokio Command
+/// This replaces the blanket `--dangerously-skip-permissions` with granular control
 pub fn apply_permissions_to_command(cmd: &mut Command, permissions: &PermissionsConfig, role: &str) {
     let mode = permissions.get_mode(role);
 
@@ -86,7 +86,7 @@ pub fn apply_permissions_to_command(cmd: &mut Command, permissions: &Permissions
     }
 }
 
-/// SEC-007: Apply permission configuration to a portable_pty CommandBuilder
+/// `SEC-007`: Apply permission configuration to a `portable_pty` `CommandBuilder`
 /// This is the PTY variant for interactive sessions
 pub fn apply_permissions_to_pty_command(cmd: &mut CommandBuilder, permissions: &PermissionsConfig, role: &str) {
     let mode = permissions.get_mode(role);
@@ -170,7 +170,7 @@ struct InteractiveSession {
 }
 
 impl AgentManager {
-    /// Create a new AgentManager
+    /// Create a new `AgentManager`
     pub fn new(config: &Config) -> Self {
         Self {
             agents: HashMap::new(),
@@ -180,7 +180,7 @@ impl AgentManager {
 
     /// Spawn a new agent with the given role
     /// This registers the agent - actual Claude Code processes are spawned
-    /// per-task in send() or on-demand via start_interactive_session()
+    /// per-task in `send()` or on-demand via `start_interactive_session()`
     pub async fn spawn(&mut self, role: AgentRole) -> Result<AgentId> {
         if self.agents.len() >= self.config.daemon.max_agents {
             return Err(anyhow!(
@@ -435,8 +435,7 @@ impl AgentManager {
     pub fn has_interactive_session(&self, agent_id: AgentId) -> bool {
         self.agents
             .get(&agent_id)
-            .map(|m| m.interactive_session.is_some())
-            .unwrap_or(false)
+            .is_some_and(|m| m.interactive_session.is_some())
     }
 
     /// Prepare an agent for task execution (call before releasing lock)
@@ -515,9 +514,9 @@ impl AgentManager {
         }
     }
 
-    /// Send a task to an agent using print mode (-p) for reliable execution
+    /// Send a task to an agent using print mode (`-p`) for reliable execution
     /// This spawns a new Claude Code process for each task
-    /// WARNING: This method holds the lock during execution - use prepare_task/record_task_result
+    /// WARNING: This method holds the lock during execution - use `prepare_task`/`record_task_result`
     /// for concurrent execution.
     pub async fn send(&mut self, agent_id: AgentId, message: &str) -> Result<String> {
         // Get agent info and update current task

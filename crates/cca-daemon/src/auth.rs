@@ -1,11 +1,11 @@
 //! API Authentication and Rate Limiting Middleware
 //!
 //! Supports two authentication methods:
-//! 1. API Key via X-API-Key header
+//! 1. API Key via `X-API-Key` header
 //! 2. Bearer token via Authorization header
 //!
 //! Rate limiting uses a token bucket algorithm with configurable rates.
-//! SEC-004: Per-IP rate limiting to prevent DoS attacks.
+//! `SEC-004`: Per-IP rate limiting to prevent DoS attacks.
 
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
@@ -109,7 +109,7 @@ pub type PerIpRateLimiter = RateLimiter<IpAddr, DashMapStateStore<IpAddr>, Defau
 pub type PerApiKeyRateLimiter = RateLimiter<String, DashMapStateStore<String>, DefaultClock, NoOpMiddleware>;
 
 /// Rate limiting configuration
-/// SEC-004: Configurable rate limits to prevent DoS attacks
+/// `SEC-004`: Configurable rate limits to prevent DoS attacks
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
     /// Requests per second per IP (0 = disabled)
@@ -118,10 +118,10 @@ pub struct RateLimitConfig {
     pub burst_size: u32,
     /// Global rate limit across all IPs (0 = disabled)
     pub global_rps: u32,
-    /// Whether to trust X-Forwarded-For header (only enable behind trusted proxy)
+    /// Whether to trust `X-Forwarded-For` header (only enable behind trusted proxy)
     pub trust_proxy: bool,
-    /// Requests per second per API key (0 = disabled, uses IP limit)
-    /// SEC-004: Per-API-key rate limiting for authenticated clients
+    /// Requests per second per API key (`0` = disabled, uses IP limit)
+    /// `SEC-004`: Per-API-key rate limiting for authenticated clients
     pub api_key_rps: u32,
     /// Burst size for API key rate limiting
     pub api_key_burst: u32,
@@ -163,7 +163,7 @@ pub fn create_rate_limiter(requests_per_second: u32) -> Arc<GlobalRateLimiter> {
 }
 
 /// Create a per-IP rate limiter with configurable burst
-/// SEC-004: Per-client rate limiting for DoS protection
+/// `SEC-004`: Per-client rate limiting for DoS protection
 pub fn create_per_ip_rate_limiter(config: &RateLimitConfig) -> Arc<PerIpRateLimiter> {
     let rps = NonZeroU32::new(config.requests_per_second)
         .unwrap_or(NonZeroU32::new(100).unwrap());
@@ -273,7 +273,7 @@ fn extract_client_ip(request: &Request<Body>, trust_proxy: bool) -> Option<IpAdd
 }
 
 /// Rate limiting middleware with per-IP and per-API-key tracking
-/// SEC-004: Per-client rate limiting to prevent DoS attacks
+/// `SEC-004`: Per-client rate limiting to prevent DoS attacks
 ///
 /// Rate limiting strategy:
 /// 1. Global rate limit - absolute cap on all requests
@@ -320,7 +320,7 @@ pub async fn rate_limit_middleware(
     // SEC-004: Per-API-key rate limiting provides separate quotas for each authenticated client
     if let (Some(ref key), Some(ref api_key_limiter)) = (&api_key, &limiter.per_api_key) {
         match api_key_limiter.check_key(key) {
-            Ok(_) => {
+            Ok(()) => {
                 debug!(
                     "API key rate limit check passed for {} from {} (key: {}...)",
                     path,
@@ -348,7 +348,7 @@ pub async fn rate_limit_middleware(
     // Check per-IP rate limit (always checked, regardless of API key)
     // SEC-004: IP rate limiting provides base protection even for authenticated requests
     match limiter.per_ip.check_key(&client_ip) {
-        Ok(_) => {
+        Ok(()) => {
             debug!("IP rate limit check passed for {} from {}", path, client_ip);
             let mut response = next.run(request).await;
 
