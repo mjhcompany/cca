@@ -2,7 +2,7 @@
 
 **Claude Code Agentic (CCA)** - Multi-Agent Orchestration System for Claude Code
 
-Version: 0.3.0 | Rust 1.75+ Required | License: MIT
+Version: 0.3.0 | Rust 1.81+ Required | License: MIT
 
 ---
 
@@ -11,19 +11,20 @@ Version: 0.3.0 | Rust 1.75+ Required | License: MIT
 1. [Overview](#overview)
 2. [Installation](#installation)
 3. [Quick Start](#quick-start)
-4. [CLI Commands](#cli-commands)
-5. [MCP Tools for Claude Code](#mcp-tools-for-claude-code)
-6. [Configuration](#configuration)
-7. [Agent Roles](#agent-roles)
-8. [Semantic Search & Embeddings](#semantic-search--embeddings)
-9. [Code Indexing](#code-indexing)
-10. [Reinforcement Learning](#reinforcement-learning)
-11. [Token Efficiency](#token-efficiency)
-12. [Security](#security)
-13. [HTTP API Reference](#http-api-reference)
-14. [Troubleshooting](#troubleshooting)
-15. [Advanced Usage](#advanced-usage)
-16. [Resources](#resources)
+4. [**Tmux Workflow (Recommended)**](#tmux-workflow-recommended)
+5. [CLI Commands](#cli-commands)
+6. [MCP Tools for Claude Code](#mcp-tools-for-claude-code)
+7. [Configuration](#configuration)
+8. [Agent Roles](#agent-roles)
+9. [Semantic Search & Embeddings](#semantic-search--embeddings)
+10. [Code Indexing](#code-indexing)
+11. [Reinforcement Learning](#reinforcement-learning)
+12. [Token Efficiency](#token-efficiency)
+13. [Security](#security)
+14. [HTTP API Reference](#http-api-reference)
+15. [Troubleshooting](#troubleshooting)
+16. [Advanced Usage](#advanced-usage)
+17. [Resources](#resources)
 
 ---
 
@@ -82,9 +83,9 @@ CCA is a next-generation multi-agent orchestration system that enables coordinat
 Before installing CCA, ensure you have:
 
 ```bash
-# Rust toolchain (1.75 or later)
+# Rust toolchain (1.81 or later)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustc --version  # Verify: rustc 1.75.0 or higher
+rustc --version  # Verify: rustc 1.81.0 or higher
 
 # Docker and Docker Compose (for infrastructure)
 docker --version
@@ -113,7 +114,7 @@ docker-compose up -d
 ```
 
 This starts:
-- PostgreSQL 16 with pgvector extension (port 5433)
+- PostgreSQL 18 with pgvector extension (port 5433)
 - Redis 7 (port 6380)
 
 3. **Build the project:**
@@ -247,6 +248,188 @@ cca task create "Analyze the codebase structure and suggest improvements"
 cca task list
 cca task status <task-id>
 ```
+
+---
+
+## Tmux Workflow (Recommended)
+
+The **recommended way** to use CCA is through a tmux session with Claude Code. This provides:
+- Organized agent management in separate windows/panes
+- Persistent sessions that survive disconnections
+- Visual overview of all running agents
+- Easy monitoring of agent activity
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        tmux session: cca                         │
+├─────────────────────────────────────────────────────────────────┤
+│ Window 0: claude-code     │ Window 1: coordinator               │
+│ ┌─────────────────────┐   │ ┌─────────────────────────────────┐ │
+│ │ $ claude            │   │ │ cca agent worker coordinator    │ │
+│ │ > Use cca_task to:  │   │ │ [Coordinator running...]        │ │
+│ │   "Build feature X" │   │ └─────────────────────────────────┘ │
+│ └─────────────────────┘   │                                     │
+├───────────────────────────┼─────────────────────────────────────┤
+│ Window 2: agents-1        │ Window 3: agents-2 (if needed)      │
+│ ┌──────────┬──────────┐   │ ┌──────────┬──────────┐             │
+│ │ backend  │ frontend │   │ │ devops   │ security │             │
+│ ├──────────┼──────────┤   │ └──────────┴──────────┘             │
+│ │ dba      │ qa       │   │                                     │
+│ └──────────┴──────────┘   │                                     │
+└───────────────────────────┴─────────────────────────────────────┘
+```
+
+### Step-by-Step Setup
+
+#### 1. Create a tmux Session
+
+```bash
+# Create a new tmux session named "cca"
+tmux new-session -s cca -n claude-code
+```
+
+#### 2. Start Infrastructure
+
+```bash
+# In the claude-code window, ensure infrastructure is running
+cd /path/to/cca
+docker-compose up -d
+
+# Start the CCA daemon
+cca daemon start
+```
+
+#### 3. Start Claude Code
+
+```bash
+# Still in the claude-code window
+claude
+```
+
+Now you're in Claude Code with CCA MCP tools available.
+
+#### 4. Use cca_task - Automatic Agent Spawning
+
+When you run `cca_task`, the system will:
+1. Create a **coordinator window** (if not exists)
+2. Spawn specialist agents in **agent windows** with **up to 4 panes each**
+3. Only create panes for agents actually needed (no empty shells)
+
+**Example in Claude Code:**
+```
+Use cca_task to: "Build a REST API for user authentication with frontend login form"
+```
+
+This might spawn:
+- Window "coordinator": Coordinator agent
+- Window "agents-1": backend (pane 1), frontend (pane 2)
+- Window "agents-2": security (pane 1) - if security review needed
+
+### Manual Agent Spawning with tmux
+
+If you prefer manual control, use these commands:
+
+```bash
+# Create coordinator in new window
+tmux new-window -n "coordinator" "cca agent worker coordinator"
+
+# Create agents window with multiple panes (up to 4)
+tmux new-window -n "agents-1" "cca agent worker backend"
+tmux split-window -h "cca agent worker frontend"
+tmux split-window -v -t 0 "cca agent worker dba"
+tmux split-window -v -t 1 "cca agent worker devops"
+
+# Add more agents in a second window if needed
+tmux new-window -n "agents-2" "cca agent worker security"
+tmux split-window -h "cca agent worker qa"
+```
+
+### Tmux Key Bindings Reference
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+b c` | Create new window |
+| `Ctrl+b n` | Next window |
+| `Ctrl+b p` | Previous window |
+| `Ctrl+b 0-9` | Switch to window N |
+| `Ctrl+b %` | Split pane horizontally |
+| `Ctrl+b "` | Split pane vertically |
+| `Ctrl+b o` | Cycle through panes |
+| `Ctrl+b d` | Detach from session |
+| `Ctrl+b w` | Window overview |
+
+### Reattaching to Sessions
+
+```bash
+# List all sessions
+tmux ls
+
+# Attach to the cca session
+tmux attach -t cca
+
+# If session exists, attach; otherwise create
+tmux new-session -A -s cca
+```
+
+### Agent Window Layout Rules
+
+CCA follows these rules when spawning agents in tmux:
+
+| Rule | Description |
+|------|-------------|
+| **Coordinator isolated** | Always gets its own window |
+| **Max 4 panes per window** | Agent windows have up to 4 panes |
+| **No empty panes** | Only create panes for actual agents |
+| **Sequential filling** | Fill current window before creating new one |
+
+**Example: 6 agents spawn request**
+```
+Window 1: coordinator
+Window 2: backend, frontend, dba, devops (4 panes)
+Window 3: security, qa (2 panes)
+```
+
+### Complete Workflow Example
+
+```bash
+# 1. Start tmux session
+tmux new-session -s cca -n claude-code
+
+# 2. Start infrastructure and daemon
+cd ~/code/cca
+docker-compose up -d
+cca daemon start
+
+# 3. Start Claude Code
+claude
+
+# 4. In Claude Code, submit a task using MCP
+# Claude will automatically spawn agents in tmux windows:
+#   "Use cca_task to: Build a user dashboard with charts"
+#
+# This creates:
+#   - Window "coordinator" with coordinator agent
+#   - Window "agents-1" with backend + frontend agents
+
+# 5. Monitor with tmux
+# Ctrl+b n  -> see coordinator window
+# Ctrl+b n  -> see agents window with panes
+
+# 6. When done, stop everything
+cca daemon stop
+docker-compose down
+tmux kill-session -t cca
+```
+
+### Tips for Effective tmux Usage
+
+1. **Use window names** - Name windows descriptively for easy navigation
+2. **Watch the coordinator** - Coordinator window shows task delegation
+3. **Pane synchronization** - Use `Ctrl+b :setw synchronize-panes on` to send commands to all panes
+4. **Save layouts** - Consider using tmuxinator or tmux-resurrect for persistent layouts
+5. **Log output** - Use `Ctrl+b :` then `capture-pane -S -3000` to capture scrollback
 
 ---
 

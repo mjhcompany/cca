@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="docs/cca_banner.jpeg" alt="CCA - Claude Code Agentic Banner" width="100%">
+</p>
+
+<p align="center">
   <h1 align="center">CCA - Claude Code Agentic</h1>
   <p align="center">
     <strong>A next-generation multi-agent orchestration system for Claude Code</strong>
@@ -13,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/rust-1.75%2B-orange?style=flat-square&logo=rust" alt="Rust 1.75+">
+  <img src="https://img.shields.io/badge/rust-1.81%2B-orange?style=flat-square&logo=rust" alt="Rust 1.81+">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License: MIT">
   <img src="https://img.shields.io/badge/status-alpha-yellow?style=flat-square" alt="Status: Alpha">
   <img src="https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square" alt="PRs Welcome">
@@ -67,7 +71,7 @@ graph TB
 
 ### Prerequisites
 
-- **Rust 1.75+** - [Install Rust](https://rustup.rs/)
+- **Rust 1.81+** - [Install Rust](https://rustup.rs/)
 - **Docker & Docker Compose** - [Install Docker](https://docs.docker.com/get-docker/)
 - **Claude Code CLI** - The `claude` command must be available
 
@@ -182,10 +186,10 @@ Comprehensive documentation is available in the [`docs/`](./docs/) folder:
 
 | Component | Technology |
 |-----------|------------|
-| Language | Rust 1.75+ |
+| Language | Rust 1.81+ |
 | HTTP Server | Axum |
 | WebSocket | Tokio-Tungstenite |
-| Database | PostgreSQL 16 + pgvector |
+| Database | PostgreSQL 18 + pgvector |
 | Cache/Pub-Sub | Redis 7 |
 | PTY Management | portable-pty |
 | Serialization | Serde |
