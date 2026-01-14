@@ -1,29 +1,77 @@
 # API Reference
 
-Complete API documentation for the CCA HTTP API and MCP tools.
+Complete API documentation for the CCA system, including HTTP REST API, WebSocket (ACP) protocol, and MCP tools.
 
-## HTTP API
+## Overview
+
+CCA exposes three API interfaces:
+
+| Interface | Protocol | Default Address | Purpose |
+|-----------|----------|-----------------|---------|
+| REST API | HTTP/HTTPS | `127.0.0.1:9200` | Task management, system control |
+| ACP | WebSocket | `127.0.0.1:9100` | Real-time agent communication |
+| MCP | JSON-RPC over stdio | N/A | Claude Code integration |
+
+---
+
+## HTTP REST API
 
 The CCA daemon exposes a REST API on the configured bind address (default: `http://127.0.0.1:9200`).
 
 ### Authentication
 
-When `require_auth: true` is set in configuration, all endpoints except `/health` require authentication.
+When `require_auth: true` is set in configuration, all endpoints except health checks require authentication.
 
-**Headers:**
+**Supported Methods:**
+
+| Method | Header | Example |
+|--------|--------|---------|
+| API Key | `X-API-Key` | `X-API-Key: your-api-key` |
+| Bearer Token | `Authorization` | `Authorization: Bearer your-api-key` |
+
+**Bypass Paths (no authentication required):**
+- `/health`
+- `/api/v1/health`
+
+**Security Features:**
+- Constant-time comparison for API key validation (timing attack prevention)
+- Rate limiting (per-IP, per-API-key, and global)
+
+### Rate Limiting
+
+CCA implements multi-tier rate limiting to prevent DoS attacks.
+
+| Tier | Default Limit | Burst | Description |
+|------|---------------|-------|-------------|
+| Per-IP | 100 req/s | 50 | Base protection for all requests |
+| Per-API-Key | 200 req/s | 100 | Higher limits for authenticated clients |
+| Global | 1000 req/s | - | Absolute cap across all clients |
+
+**Rate Limit Response Headers:**
 ```
-X-API-Key: your-api-key
-```
-or
-```
-Authorization: Bearer your-api-key
+Retry-After: <seconds>
+X-RateLimit-Limit: <limit>
+X-RateLimit-Remaining: <remaining>
+X-RateLimit-Type: <ip|api_key|global>
 ```
 
-## Health & Status
+**Rate Limit Exceeded Response (429):**
+```json
+{
+    "error": "Too many requests",
+    "message": "Rate limit exceeded. Please slow down.",
+    "limit_type": "ip",
+    "retry_after_seconds": 1
+}
+```
+
+---
+
+## Health & Status Endpoints
 
 ### GET /health
 
-Health check endpoint (bypasses authentication).
+Health check endpoint (bypasses authentication). Response is cached for performance.
 
 **Response:**
 ```json
@@ -33,14 +81,30 @@ Health check endpoint (bypasses authentication).
     "services": {
         "redis": true,
         "postgres": true,
-        "acp": true
+        "acp": true,
+        "embeddings": true
     }
 }
 ```
 
-Status values:
-- `healthy` - All services available
-- `degraded` - Some services unavailable
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | `"healthy"` or `"degraded"` |
+| `version` | string | CCA version |
+| `services.redis` | boolean | Redis connection status |
+| `services.postgres` | boolean | PostgreSQL connection status |
+| `services.acp` | boolean | ACP WebSocket server status |
+| `services.embeddings` | boolean | Embedding service availability |
+
+### GET /api/v1/health
+
+Alias for `/health`.
+
+### GET /metrics
+
+Prometheus metrics endpoint (bypasses authentication).
+
+**Response:** Prometheus text format metrics.
 
 ### GET /api/v1/status
 
@@ -57,7 +121,9 @@ System status with task and agent counts.
 }
 ```
 
-## Agent Management
+---
+
+## Agent Management Endpoints
 
 ### GET /api/v1/agents
 
@@ -83,6 +149,13 @@ List all running agents.
 }
 ```
 
+| Field | Type | Description |
+|-------|------|-------------|
+| `agent_id` | string (UUID) | Unique agent identifier |
+| `role` | string | Agent role |
+| `status` | string | `"Ready"`, `"Busy"`, `"Offline"` |
+| `current_task` | string \| null | Currently assigned task ID |
+
 ### POST /api/v1/agents
 
 Spawn a new agent.
@@ -94,7 +167,11 @@ Spawn a new agent.
 }
 ```
 
-Valid roles: `coordinator`, `frontend`, `backend`, `dba`, `devops`, `security`, `qa`
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `role` | string | Yes | Agent role to spawn |
+
+**Valid Roles:** `coordinator`, `frontend`, `backend`, `dba`, `devops`, `security`, `qa`
 
 **Response (Success):**
 ```json
@@ -109,6 +186,81 @@ Valid roles: `coordinator`, `frontend`, `backend`, `dba`, `devops`, `security`, 
 ```json
 {
     "error": "Maximum number of agents (10) reached"
+}
+```
+
+### POST /api/v1/agents/:agent_id/send
+
+Send a message directly to a specific agent.
+
+**Path Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `agent_id` | string | Target agent ID |
+
+**Request:**
+```json
+{
+    "message": "Process this data...",
+    "timeout_seconds": 60
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `message` | string | Yes | - | Message to send |
+| `timeout_seconds` | integer | No | 30 | Response timeout |
+
+**Response:**
+```json
+{
+    "success": true,
+    "output": "Processing complete...",
+    "error": null,
+    "duration_ms": 1234,
+    "tokens_used": 500
+}
+```
+
+### POST /api/v1/agents/:agent_id/attach
+
+Start an interactive session with an agent.
+
+**Path Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `agent_id` | string | Target agent ID |
+
+**Response:**
+```json
+{
+    "session_id": "session-uuid",
+    "status": "attached"
+}
+```
+
+### GET /api/v1/agents/:agent_id/logs
+
+Get recent logs from a specific agent.
+
+**Path Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `agent_id` | string | Target agent ID |
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `lines` | integer | 100 | Number of log lines to return |
+
+**Response:**
+```json
+{
+    "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+    "logs": [
+        "2024-01-10T12:00:00Z INFO Starting task processing",
+        "2024-01-10T12:00:01Z DEBUG Received message from coordinator"
+    ]
 }
 ```
 
@@ -154,11 +306,13 @@ Get workload distribution across agents.
 }
 ```
 
-## Task Management
+---
+
+## Task Management Endpoints
 
 ### POST /api/v1/tasks
 
-Create a new task.
+Create a new task for the coordinator to route.
 
 **Request:**
 ```json
@@ -168,7 +322,12 @@ Create a new task.
 }
 ```
 
-Priority values: `low`, `normal`, `high`, `critical`
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `description` | string | Yes | - | Task description (max 100KB) |
+| `priority` | string | No | `"normal"` | Priority level |
+
+**Priority Values:** `low`, `normal`, `high`, `critical`
 
 **Response (Success):**
 ```json
@@ -211,9 +370,14 @@ List all tasks.
 }
 ```
 
-### GET /api/v1/tasks/{task_id}
+### GET /api/v1/tasks/:task_id
 
 Get specific task status.
+
+**Path Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `task_id` | string | Task ID |
 
 **Response:**
 ```json
@@ -226,15 +390,49 @@ Get specific task status.
 }
 ```
 
-**Status codes:**
-- `200` - Task found
-- `404` - Task not found
+**Task Status Values:** `pending`, `assigned`, `in_progress`, `completed`, `failed`
 
-## Memory (ReasoningBank)
+### POST /api/v1/delegate
+
+Delegate a task to a specific role with additional context.
+
+**Request:**
+```json
+{
+    "role": "backend",
+    "task": "Implement user authentication",
+    "context": "Use JWT tokens with 24h expiry",
+    "timeout_seconds": 120
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `role` | string | Yes | - | Target agent role |
+| `task` | string | Yes | - | Task description |
+| `context` | string | No | null | Additional context |
+| `timeout_seconds` | integer | No | 60 | Task timeout |
+
+**Response:**
+```json
+{
+    "success": true,
+    "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+    "role": "backend",
+    "output": "Implementation complete...",
+    "error": null,
+    "duration_ms": 5432,
+    "tokens_used": 2500
+}
+```
+
+---
+
+## Memory (ReasoningBank) Endpoints
 
 ### POST /api/v1/memory/search
 
-Search patterns in ReasoningBank with semantic search support. When embeddings are available, performs vector similarity search using pgvector. Falls back to text-based search when embeddings are unavailable.
+Search patterns in ReasoningBank with semantic search support.
 
 **Request:**
 ```json
@@ -246,8 +444,8 @@ Search patterns in ReasoningBank with semantic search support. When embeddings a
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `query` | string | Yes | - | Search query text (max 1,000 bytes) |
-| `limit` | integer | No | 10 | Maximum number of results to return |
+| `query` | string | Yes | - | Search query (max 1KB) |
+| `limit` | integer | No | 10 | Maximum results |
 
 **Response (Semantic Search):**
 ```json
@@ -271,84 +469,21 @@ Search patterns in ReasoningBank with semantic search support. When embeddings a
 }
 ```
 
-**Response (Text Search Fallback):**
-```json
-{
-    "success": true,
-    "patterns": [
-        {
-            "id": "550e8400-e29b-41d4-a716-446655440000",
-            "pattern_type": "code",
-            "content": "JWT authentication pattern...",
-            "success_rate": 0.95,
-            "success_count": 19,
-            "failure_count": 1,
-            "created_at": "2024-01-10T10:00:00Z"
-        }
-    ],
-    "count": 1,
-    "query": "authentication",
-    "search_type": "text"
-}
-```
-
-| Response Field | Type | Description |
-|----------------|------|-------------|
-| `success` | boolean | Whether the search succeeded |
-| `patterns` | array | Array of matching pattern objects |
-| `patterns[].id` | string (UUID) | Unique pattern identifier |
-| `patterns[].pattern_type` | string | Type classification of the pattern |
-| `patterns[].content` | string | The pattern content text |
-| `patterns[].success_rate` | float \| null | Success ratio (0.0-1.0) or null if no executions |
-| `patterns[].success_count` | integer | Number of successful executions |
-| `patterns[].failure_count` | integer | Number of failed executions |
-| `patterns[].similarity` | float | Cosine similarity score (0.0-1.0), only present in semantic search |
-| `patterns[].created_at` | string (ISO 8601) | Creation timestamp |
-| `count` | integer | Number of results returned |
-| `query` | string | Echo of the input query |
-| `search_type` | string | Either `"semantic"` or `"text"` indicating search method used |
+| Field | Type | Description |
+|-------|------|-------------|
+| `search_type` | string | `"semantic"` (vector) or `"text"` (fallback) |
+| `similarity` | float | Cosine similarity (0.0-1.0), semantic only |
+| `success_rate` | float \| null | Success ratio or null if no executions |
 
 **Search Behavior:**
-
-1. **Semantic Search (Primary):** When the embedding service is available:
-   - Query text is converted to a 768-dimensional vector using Ollama's `nomic-embed-text` model
-   - pgvector performs cosine similarity search against pattern embeddings
-   - Results are filtered with a minimum similarity threshold of **0.3** (30%)
-   - Results are ordered by similarity (highest first)
-
-2. **Text Search (Fallback):** When embeddings are unavailable:
-   - Uses case-insensitive substring matching (PostgreSQL `ILIKE`)
-   - Results ordered by `success_rate DESC`, then `created_at DESC`
-
-**Error Responses:**
-
-Query too long (400):
-```json
-{
-    "success": false,
-    "error": "Query too long: 1500 bytes (max: 1000 bytes)"
-}
-```
-
-PostgreSQL unavailable (503):
-```json
-{
-    "success": false,
-    "error": "PostgreSQL not available"
-}
-```
-
----
+1. **Semantic Search:** Uses pgvector with `nomic-embed-text` embeddings (768 dimensions). Minimum similarity threshold: 0.3.
+2. **Text Fallback:** Case-insensitive substring matching when embeddings unavailable.
 
 ### POST /api/v1/memory/backfill-embeddings
 
-Generate embeddings for existing patterns that don't have them. Processes patterns in batches of 10, prioritizing most recently created patterns.
+Generate embeddings for patterns that don't have them.
 
-**Request:**
-
-No request body required.
-
-**Response (Success):**
+**Response:**
 ```json
 {
     "success": true,
@@ -358,95 +493,148 @@ No request body required.
 }
 ```
 
-| Response Field | Type | Description |
-|----------------|------|-------------|
-| `success` | boolean | Whether the backfill operation succeeded |
-| `processed` | integer | Number of patterns successfully updated with embeddings |
-| `errors` | integer | Number of patterns that failed to update |
-| `remaining` | integer | Number of patterns still without embeddings |
+---
 
-**Response (Nothing to Process):**
+## Code Indexing Endpoints
+
+### POST /api/v1/memory/index
+
+Start indexing a codebase for semantic code search.
+
+**Request:**
+```json
+{
+    "path": "/home/user/project",
+    "extensions": [".rs", ".py", ".ts"],
+    "exclude_patterns": ["**/node_modules/**", "**/target/**"]
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `path` | string | Yes | - | Directory to index |
+| `extensions` | array | No | Common extensions | File extensions to include |
+| `exclude_patterns` | array | No | [] | Glob patterns to exclude |
+
+**Response:**
 ```json
 {
     "success": true,
-    "message": "No patterns need embedding backfill",
-    "processed": 0
+    "job_id": "job-550e8400",
+    "message": "Indexing started"
 }
 ```
 
-**How It Works:**
+### GET /api/v1/memory/index/:job_id
 
-1. Fetches up to 10 patterns where `embedding IS NULL`, ordered by `created_at DESC`
-2. Sends pattern content to Ollama embedding service for batch processing
-3. Updates each pattern with its 768-dimensional embedding vector
-4. Returns counts of processed patterns and remaining work
+Get status of an indexing job.
 
-**Usage Notes:**
-
-- Call repeatedly until `remaining` reaches 0 to backfill all patterns
-- Safe to run concurrently with normal operations
-- Individual pattern errors don't abort the batch; check `errors` count
-- Requires Ollama running with `nomic-embed-text` model available
-
-**Error Responses:**
-
-Embedding service not configured (503):
+**Response:**
 ```json
 {
-    "success": false,
-    "error": "Embedding service not configured"
+    "job_id": "job-550e8400",
+    "status": "running",
+    "progress": 45,
+    "files_processed": 120,
+    "files_total": 267,
+    "symbols_indexed": 1543
 }
 ```
 
-PostgreSQL unavailable (503):
+**Job Status Values:** `pending`, `running`, `completed`, `failed`, `cancelled`
+
+### POST /api/v1/memory/index/:job_id/cancel
+
+Cancel a running indexing job.
+
+**Response:**
 ```json
 {
-    "success": false,
-    "error": "PostgreSQL not available"
+    "success": true,
+    "message": "Job cancelled"
 }
 ```
 
-Failed to fetch patterns (500):
+### GET /api/v1/memory/index/jobs
+
+List all indexing jobs.
+
+**Response:**
 ```json
 {
-    "success": false,
-    "error": "Failed to get patterns: [error details]"
+    "jobs": [
+        {
+            "job_id": "job-001",
+            "status": "completed",
+            "path": "/home/user/project",
+            "started_at": "2024-01-10T10:00:00Z",
+            "completed_at": "2024-01-10T10:05:00Z"
+        }
+    ]
 }
 ```
 
-Failed to generate embeddings (500):
+### POST /api/v1/code/search
+
+Search indexed code using semantic similarity.
+
+**Request:**
 ```json
 {
-    "success": false,
-    "error": "Failed to generate embeddings: [error details]"
+    "query": "function that validates user input",
+    "limit": 10,
+    "language": "rust"
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `query` | string | Yes | - | Natural language query |
+| `limit` | integer | No | 10 | Maximum results |
+| `language` | string | No | null | Filter by language |
+
+**Response:**
+```json
+{
+    "success": true,
+    "results": [
+        {
+            "file_path": "/src/validation.rs",
+            "symbol_name": "validate_input",
+            "symbol_type": "function",
+            "language": "rust",
+            "content": "pub fn validate_input(input: &str) -> Result<(), ValidationError>...",
+            "line_start": 45,
+            "line_end": 67,
+            "similarity": 0.89
+        }
+    ],
+    "count": 1
+}
+```
+
+### GET /api/v1/code/stats
+
+Get code indexing statistics.
+
+**Response:**
+```json
+{
+    "success": true,
+    "total_files": 500,
+    "total_symbols": 3500,
+    "languages": {
+        "rust": 200,
+        "python": 150,
+        "typescript": 150
+    },
+    "last_indexed": "2024-01-10T10:05:00Z"
 }
 ```
 
 ---
 
-### Embedding Configuration
-
-The semantic search feature requires:
-
-| Component | Requirement |
-|-----------|-------------|
-| PostgreSQL | pgvector extension enabled |
-| Embedding Model | Ollama with `nomic-embed-text:latest` |
-| Vector Dimensions | 768 |
-| Ollama URL | Default: `http://localhost:11434` |
-
-**Database Schema (patterns table):**
-```sql
-embedding vector(768)  -- pgvector column
-
--- Index for fast similarity search
-CREATE INDEX idx_patterns_embedding ON patterns
-    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-```
-
-See [Configuration](./configuration.md) for embedding service setup options.
-
-## Communication
+## Communication Endpoints
 
 ### GET /api/v1/acp/status
 
@@ -460,15 +648,63 @@ Get ACP WebSocket server status.
     "connected_agents": 3,
     "agent_ids": [
         "550e8400-e29b-41d4-a716-446655440000",
-        "550e8400-e29b-41d4-a716-446655440001",
-        "550e8400-e29b-41d4-a716-446655440002"
+        "550e8400-e29b-41d4-a716-446655440001"
+    ],
+    "workers": [
+        {
+            "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+            "role": "backend",
+            "status": "connected"
+        }
     ]
+}
+```
+
+### POST /api/v1/acp/disconnect
+
+Disconnect an agent from the ACP server.
+
+**Request:**
+```json
+{
+    "agent_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**Response:**
+```json
+{
+    "success": true,
+    "message": "Agent disconnected"
+}
+```
+
+### POST /api/v1/acp/send
+
+Send a task to a specific agent via ACP.
+
+**Request:**
+```json
+{
+    "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+    "task": "Process this request",
+    "context": "Additional context here"
+}
+```
+
+**Response:**
+```json
+{
+    "success": true,
+    "output": "Task completed...",
+    "tokens_used": 500,
+    "duration_ms": 1234
 }
 ```
 
 ### POST /api/v1/broadcast
 
-Broadcast message to all agents.
+Broadcast message to all agents (ACP + Redis).
 
 **Request:**
 ```json
@@ -476,6 +712,10 @@ Broadcast message to all agents.
     "message": "System maintenance in 5 minutes"
 }
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `message` | string | Yes | Message to broadcast (max 10KB) |
 
 **Response:**
 ```json
@@ -490,13 +730,6 @@ Broadcast message to all agents.
 
 Broadcast via Redis pub/sub only.
 
-**Request:**
-```json
-{
-    "message": "Status update"
-}
-```
-
 **Response:**
 ```json
 {
@@ -505,7 +738,9 @@ Broadcast via Redis pub/sub only.
 }
 ```
 
-## Infrastructure Status
+---
+
+## Infrastructure Status Endpoints
 
 ### GET /api/v1/redis/status
 
@@ -542,15 +777,9 @@ Get PostgreSQL connection status.
 }
 ```
 
-**Response (Disconnected):**
-```json
-{
-    "connected": false,
-    "error": "PostgreSQL not available"
-}
-```
+---
 
-## Reinforcement Learning
+## Reinforcement Learning Endpoints
 
 ### GET /api/v1/rl/stats
 
@@ -574,20 +803,11 @@ Get RL engine statistics.
 
 Trigger training on collected experiences.
 
-**Response (Success):**
+**Response:**
 ```json
 {
     "success": true,
     "loss": 0.021,
-    "message": "Training complete"
-}
-```
-
-**Response (Insufficient Data):**
-```json
-{
-    "success": true,
-    "loss": 0.0,
     "message": "Training complete"
 }
 ```
@@ -602,6 +822,10 @@ Set the active RL algorithm.
     "algorithm": "dqn"
 }
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `algorithm` | string | Yes | `"q_learning"`, `"dqn"`, or `"ppo"` |
 
 **Response:**
 ```json
@@ -649,7 +873,9 @@ Set algorithm parameters.
 }
 ```
 
-## Token Efficiency
+---
+
+## Token Efficiency Endpoints
 
 ### POST /api/v1/tokens/analyze
 
@@ -662,6 +888,11 @@ Analyze content for token usage.
     "agent_id": "optional-agent-id"
 }
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `content` | string | Yes | Content to analyze (max 1MB) |
+| `agent_id` | string | No | Associate with agent |
 
 **Response:**
 ```json
@@ -689,6 +920,13 @@ Compress content to reduce tokens.
     "agent_id": "optional-agent-id"
 }
 ```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `content` | string | Yes | - | Content to compress |
+| `compress_code` | boolean | No | true | Remove code comments |
+| `target_reduction` | float | No | 0.3 | Target reduction (0.0-1.0) |
+| `agent_id` | string | No | null | Associate with agent |
 
 **Response:**
 ```json
@@ -757,37 +995,58 @@ Get token efficiency recommendations.
 }
 ```
 
+---
+
 ## Error Responses
 
 All endpoints may return error responses:
 
-**400 Bad Request:**
+### 400 Bad Request
 ```json
 {
     "error": "Description too long: 150000 bytes (max: 100000 bytes)"
 }
 ```
 
-**401 Unauthorized:**
+### 401 Unauthorized
 ```json
 {
     "error": "Missing or invalid API key"
 }
 ```
 
-**404 Not Found:**
+### 404 Not Found
 ```json
 {
     "error": "Task not found"
 }
 ```
 
-**500 Internal Server Error:**
+### 429 Too Many Requests
+```json
+{
+    "error": "Too many requests",
+    "message": "Rate limit exceeded. Please slow down.",
+    "limit_type": "ip",
+    "retry_after_seconds": 1
+}
+```
+
+### 500 Internal Server Error
 ```json
 {
     "error": "Internal server error: ..."
 }
 ```
+
+### 503 Service Unavailable
+```json
+{
+    "error": "PostgreSQL not available"
+}
+```
+
+---
 
 ## Input Limits
 
@@ -798,6 +1057,576 @@ All endpoints may return error responses:
 | Token content | 1 MB |
 | Memory query | 1 KB |
 
-## MCP Tools
+---
 
-See [cca-mcp documentation](./components/cca-mcp.md) for MCP tool reference.
+## WebSocket API (ACP - Agent Control Protocol)
+
+The ACP server provides real-time bidirectional communication using JSON-RPC 2.0 over WebSocket.
+
+### Connection
+
+**WebSocket URL:** `ws://127.0.0.1:9100` (configurable)
+
+### Authentication
+
+ACP supports three authentication methods:
+
+| Method | Example |
+|--------|---------|
+| Query Parameter | `ws://127.0.0.1:9100?token=your-api-key` |
+| Header (X-API-Key) | During WebSocket handshake |
+| Header (Bearer) | `Authorization: Bearer your-api-key` |
+
+When authentication is required, agents must authenticate before sending other messages.
+
+### JSON-RPC 2.0 Format
+
+**Request:**
+```json
+{
+    "jsonrpc": "2.0",
+    "method": "methodName",
+    "params": { ... },
+    "id": 1
+}
+```
+
+**Response (Success):**
+```json
+{
+    "jsonrpc": "2.0",
+    "result": { ... },
+    "id": 1
+}
+```
+
+**Response (Error):**
+```json
+{
+    "jsonrpc": "2.0",
+    "error": {
+        "code": -32600,
+        "message": "Invalid Request",
+        "data": null
+    },
+    "id": 1
+}
+```
+
+**Notification (no response expected):**
+```json
+{
+    "jsonrpc": "2.0",
+    "method": "methodName",
+    "params": { ... }
+}
+```
+
+### ACP Methods
+
+#### registerAgent
+
+Register an agent with the server. Must be called after connecting.
+
+**Parameters:**
+```json
+{
+    "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+    "role": "backend",
+    "capabilities": ["rust", "api", "database"],
+    "metadata": {}
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `agent_id` | string (UUID) | Yes | Unique agent identifier |
+| `role` | string | Yes | Agent role |
+| `capabilities` | array | No | Agent capabilities |
+| `metadata` | object | No | Additional metadata |
+
+**Response:**
+```json
+{
+    "accepted": true,
+    "message": "Agent registered successfully",
+    "assigned_tasks_channel": "tasks:backend"
+}
+```
+
+#### heartbeat
+
+Keep-alive and time synchronization.
+
+**Parameters:**
+```json
+{
+    "timestamp": 1704888000000
+}
+```
+
+**Response:**
+```json
+{
+    "timestamp": 1704888000000,
+    "server_time": 1704888000005
+}
+```
+
+#### getStatus
+
+Get current agent status.
+
+**Response:**
+```json
+{
+    "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+    "state": "Ready",
+    "current_task": null,
+    "uptime_seconds": 3600
+}
+```
+
+#### sendMessage
+
+Send a message to another agent.
+
+**Parameters:**
+```json
+{
+    "to": "550e8400-e29b-41d4-a716-446655440001",
+    "content": "Process this request",
+    "metadata": {}
+}
+```
+
+#### executeTask
+
+Request immediate task execution.
+
+**Parameters:**
+```json
+{
+    "description": "Implement user validation",
+    "priority": 1,
+    "metadata": {}
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `description` | string | Yes | - | Task description |
+| `priority` | integer | No | 0 | 0=low, 1=normal, 2=high, 3=critical |
+| `metadata` | object | No | {} | Additional task data |
+
+#### cancelTask
+
+Cancel a running task.
+
+**Parameters:**
+```json
+{
+    "task_id": "task-550e8400"
+}
+```
+
+#### queryAgent
+
+Query agent information.
+
+**Parameters:**
+```json
+{
+    "query_type": "status",
+    "agent_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+| Query Type | Description |
+|------------|-------------|
+| `list_all` | List all agents |
+| `status` | Get agent status |
+| `capabilities` | Get agent capabilities |
+| `workload` | Get agent workload |
+
+### ACP Notifications (Server → Agent)
+
+#### taskAssign
+
+Server assigns a task to an agent.
+
+```json
+{
+    "task_id": "task-550e8400",
+    "description": "Implement authentication",
+    "priority": 2,
+    "parent_task": null,
+    "token_budget": 5000,
+    "metadata": {}
+}
+```
+
+#### broadcast
+
+Server broadcasts a message to all agents.
+
+```json
+{
+    "message_type": "announcement",
+    "content": { "message": "System maintenance in 5 minutes" }
+}
+```
+
+**Broadcast Types:** `announcement`, `config_update`, `health_check`, `task_notification`, `custom`
+
+### ACP Notifications (Agent → Server)
+
+#### taskResult
+
+Agent reports task completion.
+
+```json
+{
+    "task_id": "task-550e8400",
+    "success": true,
+    "output": "Authentication implemented...",
+    "tokens_used": 2500,
+    "duration_ms": 5432,
+    "error": null,
+    "metadata": {}
+}
+```
+
+#### taskProgress
+
+Agent reports progress update.
+
+```json
+{
+    "task_id": "task-550e8400",
+    "progress_pct": 50,
+    "message": "Implementing token validation...",
+    "subtasks_completed": 2,
+    "subtasks_total": 4
+}
+```
+
+### ACP Error Codes
+
+| Code | Message | Description |
+|------|---------|-------------|
+| -32700 | Parse error | Invalid JSON |
+| -32600 | Invalid Request | Malformed JSON-RPC request |
+| -32601 | Method not found | Unknown method name |
+| -32602 | Invalid params | Invalid method parameters |
+| -32603 | Internal error | Server internal error |
+
+### Backpressure Handling
+
+ACP implements backpressure protection for slow consumers:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `channel_capacity` | 100 | Outbound message buffer size |
+| `max_consecutive_drops` | 10 | Drops before disconnection |
+| `warning_threshold` | 0.8 | Channel fullness warning level |
+
+When a client can't keep up, messages are dropped. After too many consecutive drops, the slow consumer is disconnected.
+
+---
+
+## MCP Tools Reference
+
+MCP (Model Context Protocol) tools enable Claude Code integration via JSON-RPC over stdio.
+
+### cca_task
+
+Send a task to the CCA system.
+
+**Parameters:**
+```json
+{
+    "description": "Implement user authentication",
+    "priority": "high"
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `description` | string | Yes | Task description |
+| `priority` | string | No | `low`, `normal`, `high`, `critical` |
+
+### cca_status
+
+Check task or system status.
+
+**Parameters:**
+```json
+{
+    "task_id": "task-550e8400"
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task_id` | string | No | Specific task ID (omit for system status) |
+
+### cca_activity
+
+Get current activity of all agents.
+
+**Parameters:** None
+
+### cca_agents
+
+List all running agents.
+
+**Parameters:** None
+
+### cca_memory
+
+Query the ReasoningBank for learned patterns.
+
+**Parameters:**
+```json
+{
+    "query": "authentication patterns",
+    "limit": 10
+}
+```
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | Yes | - | Search query |
+| `limit` | number | No | 10 | Maximum results |
+
+### cca_acp_status
+
+Get ACP WebSocket server status.
+
+**Parameters:** None
+
+### cca_broadcast
+
+Broadcast a message to all connected agents.
+
+**Parameters:**
+```json
+{
+    "message": "System update complete"
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `message` | string | Yes | Message to broadcast |
+
+### cca_workloads
+
+Get current workload distribution.
+
+**Parameters:** None
+
+### cca_rl_status
+
+Get RL engine status and statistics.
+
+**Parameters:** None
+
+### cca_rl_train
+
+Trigger RL training on collected experiences.
+
+**Parameters:** None
+
+### cca_rl_algorithm
+
+Set the RL algorithm.
+
+**Parameters:**
+```json
+{
+    "algorithm": "dqn"
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `algorithm` | string | Yes | `q_learning`, `dqn`, or `ppo` |
+
+### cca_tokens_analyze
+
+Analyze content for token usage.
+
+**Parameters:**
+```json
+{
+    "content": "Content to analyze...",
+    "agent_id": "agent-001"
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `content` | string | Yes | Content to analyze |
+| `agent_id` | string | No | Associate with agent |
+
+### cca_tokens_compress
+
+Compress content to reduce tokens.
+
+**Parameters:**
+```json
+{
+    "content": "Content to compress...",
+    "strategies": ["code_comments", "deduplicate"],
+    "target_reduction": 0.3,
+    "agent_id": "agent-001"
+}
+```
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `content` | string | Yes | - | Content to compress |
+| `strategies` | array | No | all | Compression strategies |
+| `target_reduction` | number | No | 0.3 | Target reduction (0.0-1.0) |
+| `agent_id` | string | No | null | Associate with agent |
+
+**Available Strategies:** `code_comments`, `history`, `summarize`, `deduplicate`
+
+### cca_tokens_metrics
+
+Get token efficiency metrics.
+
+**Parameters:** None
+
+### cca_tokens_recommendations
+
+Get recommendations for improving token efficiency.
+
+**Parameters:** None
+
+### cca_index_codebase
+
+Index a codebase for semantic code search.
+
+**Parameters:**
+```json
+{
+    "path": "/home/user/project",
+    "extensions": [".rs", ".py"],
+    "exclude_patterns": ["**/target/**"]
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Directory to index |
+| `extensions` | array | No | File extensions to include |
+| `exclude_patterns` | array | No | Glob patterns to exclude |
+
+### cca_search_code
+
+Search indexed code using semantic similarity.
+
+**Parameters:**
+```json
+{
+    "query": "function that handles authentication",
+    "limit": 10,
+    "language": "rust"
+}
+```
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | Yes | - | Natural language query |
+| `limit` | number | No | 10 | Maximum results |
+| `language` | string | No | null | Filter by language |
+
+---
+
+## Usage Examples
+
+### cURL Examples
+
+**Create a task:**
+```bash
+curl -X POST http://127.0.0.1:9200/api/v1/tasks \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{"description": "Implement user authentication", "priority": "high"}'
+```
+
+**List agents:**
+```bash
+curl http://127.0.0.1:9200/api/v1/agents \
+  -H "X-API-Key: your-api-key"
+```
+
+**Search memory:**
+```bash
+curl -X POST http://127.0.0.1:9200/api/v1/memory/search \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-api-key" \
+  -d '{"query": "database optimization", "limit": 5}'
+```
+
+**Broadcast message:**
+```bash
+curl -X POST http://127.0.0.1:9200/api/v1/broadcast \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{"message": "System maintenance starting"}'
+```
+
+### WebSocket Example (JavaScript)
+
+```javascript
+const ws = new WebSocket('ws://127.0.0.1:9100?token=your-api-key');
+
+ws.onopen = () => {
+  // Register agent
+  ws.send(JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'registerAgent',
+    params: {
+      agent_id: '550e8400-e29b-41d4-a716-446655440000',
+      role: 'backend',
+      capabilities: ['rust', 'api']
+    },
+    id: 1
+  }));
+};
+
+ws.onmessage = (event) => {
+  const message = JSON.parse(event.data);
+
+  if (message.method === 'taskAssign') {
+    // Handle task assignment
+    console.log('Received task:', message.params);
+
+    // Report completion
+    ws.send(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'taskResult',
+      params: {
+        task_id: message.params.task_id,
+        success: true,
+        output: 'Task completed',
+        tokens_used: 500,
+        duration_ms: 1000
+      }
+    }));
+  }
+};
+```
+
+---
+
+## See Also
+
+- [Configuration Guide](./configuration.md) - Server and authentication configuration
+- [Deployment Guide](./deployment.md) - Production deployment instructions
+- [Architecture Overview](./architecture.md) - System design and components
+- [Security Hardening](./security-hardening.md) - Security best practices

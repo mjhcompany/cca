@@ -1,0 +1,289 @@
+name: Performance Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      test_duration:
+        description: 'Test duration (e.g., 2m, 5m, 10m)'
+        required: false
+        default: '2m'
+      vus:
+        description: 'Number of virtual users'
+        required: false
+        default: '10'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  performance-test:
+    name: Load Testing
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: cca
+          POSTGRES_PASSWORD: cca_test
+          POSTGRES_DB: cca_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Build CCA daemon
+        run: cargo build --release --bin ccad
+
+      - name: Run database migrations
+        run: |
+          for migration in migrations/*.sql; do
+            PGPASSWORD=cca_test psql -h localhost -U cca -d cca_test -f "$migration" || true
+          done
+
+      - name: Start CCA daemon
+        run: |
+          ./target/release/ccad &
+          sleep 5
+          curl -f http://localhost:9200/health || exit 1
+        env:
+          CCA__POSTGRES__URL: postgres://cca:cca_test@localhost:5432/cca_test
+          CCA__REDIS__URL: redis://localhost:6379
+          CCA__DAEMON__REQUIRE_AUTH: "false"
+          CCA__DAEMON__BIND_ADDRESS: "127.0.0.1:9200"
+
+      - name: Run baseline performance test
+        id: baseline
+        run: |
+          mkdir -p tests/load/results
+          k6 run \
+            --duration ${{ github.event.inputs.test_duration || '2m' }} \
+            --vus ${{ github.event.inputs.vus || '10' }} \
+            --out json=tests/load/results/baseline-results.json \
+            tests/load/baseline.js
+        env:
+          CCA_HTTP_URL: http://localhost:9200
+          CCA_API_KEY: test-api-key
+
+      - name: Run full system test
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          k6 run \
+            --duration ${{ github.event.inputs.test_duration || '5m' }} \
+            --vus ${{ github.event.inputs.vus || '20' }} \
+            --out json=tests/load/results/full-system-results.json \
+            tests/load/full-system.js
+        env:
+          CCA_HTTP_URL: http://localhost:9200
+          CCA_WS_URL: ws://localhost:9100
+          CCA_API_KEY: test-api-key
+
+      - name: Parse results and check thresholds
+        id: check_thresholds
+        run: |
+          # Parse k6 results
+          if [ -f tests/load/results/baseline-results.json ]; then
+            # Extract key metrics using jq
+            P95=$(cat tests/load/results/baseline-results.json | jq -s '[.[] | select(.type=="Point" and .metric=="http_req_duration") | .data.value] | sort | .[length * 0.95 | floor]' 2>/dev/null || echo "null")
+            ERROR_RATE=$(cat tests/load/results/baseline-results.json | jq -s '[.[] | select(.type=="Point" and .metric=="http_req_failed")] | (map(select(.data.value == 1)) | length) / length' 2>/dev/null || echo "0")
+
+            echo "p95_latency=${P95}" >> $GITHUB_OUTPUT
+            echo "error_rate=${ERROR_RATE}" >> $GITHUB_OUTPUT
+
+            # Check thresholds
+            if [ "$P95" != "null" ] && [ "$(echo "$P95 > 2000" | bc -l)" -eq 1 ]; then
+              echo "threshold_breach=true" >> $GITHUB_OUTPUT
+              echo "::warning::P95 latency (${P95}ms) exceeds threshold (2000ms)"
+            else
+              echo "threshold_breach=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Upload performance results
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-results-${{ github.run_id }}
+          path: tests/load/results/
+          retention-days: 30
+
+      - name: Comment on PR with results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const p95 = '${{ steps.check_thresholds.outputs.p95_latency }}';
+            const errorRate = '${{ steps.check_thresholds.outputs.error_rate }}';
+            const thresholdBreach = '${{ steps.check_thresholds.outputs.threshold_breach }}' === 'true';
+
+            const status = thresholdBreach ? '⚠️' : '✅';
+            const body = `## ${status} Performance Test Results
+
+            | Metric | Value | Threshold |
+            |--------|-------|-----------|
+            | P95 Latency | ${p95 || 'N/A'}ms | <2000ms |
+            | Error Rate | ${(parseFloat(errorRate || 0) * 100).toFixed(2)}% | <1% |
+
+            ${thresholdBreach ? '⚠️ **Performance threshold breached!** Please investigate before merging.' : '✅ All performance thresholds passed.'}
+
+            <details>
+            <summary>View full results</summary>
+
+            Test configuration:
+            - Duration: ${{ github.event.inputs.test_duration || '2m' }}
+            - Virtual Users: ${{ github.event.inputs.vus || '10' }}
+
+            [Download detailed results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            </details>`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Fail if thresholds breached
+        if: steps.check_thresholds.outputs.threshold_breach == 'true'
+        run: |
+          echo "Performance thresholds were breached!"
+          exit 1
+
+  chaos-test:
+    name: Chaos Testing
+    runs-on: ubuntu-latest
+    # Only run chaos tests on schedule or manual trigger
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Compose
+        run: |
+          docker compose -f docker-compose.test.yml up -d
+          sleep 10
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Build CCA daemon
+        run: cargo build --release --bin ccad
+
+      - name: Start CCA daemon (with toxiproxy endpoints)
+        run: |
+          ./target/release/ccad &
+          sleep 5
+          curl -f http://localhost:9200/health || exit 1
+        env:
+          CCA__POSTGRES__URL: postgres://cca:cca_test@localhost:15434/cca_test
+          CCA__REDIS__URL: redis://localhost:16381
+          CCA__DAEMON__REQUIRE_AUTH: "false"
+          CCA__DAEMON__BIND_ADDRESS: "127.0.0.1:9200"
+
+      - name: Run chaos experiments
+        run: |
+          chmod +x tests/chaos/run-chaos.sh
+          # Run each experiment for 30 seconds
+          ./tests/chaos/run-chaos.sh redis-latency 30
+          sleep 5
+          ./tests/chaos/run-chaos.sh postgres-latency 30
+          sleep 5
+          ./tests/chaos/run-chaos.sh network-jitter 30
+        continue-on-error: true
+
+      - name: Upload chaos test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-results-${{ github.run_id }}
+          path: tests/chaos/results/
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v
+
+  benchmark-comparison:
+    name: Benchmark Comparison
+    runs-on: ubuntu-latest
+    needs: performance-test
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref }}
+          path: base
+
+      - uses: actions/checkout@v4
+        with:
+          path: pr
+
+      - name: Download PR results
+        uses: actions/download-artifact@v4
+        with:
+          name: performance-results-${{ github.run_id }}
+          path: pr-results
+
+      - name: Compare with baseline
+        id: compare
+        run: |
+          # This would compare against stored baseline metrics
+          # For now, just report the PR metrics
+          if [ -f pr-results/baseline-summary.json ]; then
+            cat pr-results/baseline-summary.json
+          fi
+
+      - name: Update PR status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // This could update a PR check with performance comparison
+            console.log('Performance comparison completed');

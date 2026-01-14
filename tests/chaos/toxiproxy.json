@@ -1,0 +1,14 @@
+[
+  {
+    "name": "redis",
+    "listen": "0.0.0.0:16381",
+    "upstream": "redis-test:6379",
+    "enabled": true
+  },
+  {
+    "name": "postgres",
+    "listen": "0.0.0.0:15434",
+    "upstream": "postgres-test:5432",
+    "enabled": true
+  }
+]

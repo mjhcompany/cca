@@ -338,6 +338,7 @@ fn create_router(state: DaemonState) -> Router {
 
     let mut router = Router::new()
         .route("/health", get(health_check))
+        .route("/metrics", get(prometheus_metrics))
         .route("/api/v1/health", get(health_check))
         .route("/api/v1/status", get(get_status))
         .route("/api/v1/agents", get(list_agents))
@@ -746,6 +747,15 @@ pub struct ServiceHealth {
 struct CachedHealthCheck {
     response: HealthResponse,
     cached_at: std::time::Instant,
+}
+
+/// Prometheus metrics endpoint
+async fn prometheus_metrics() -> ([(axum::http::header::HeaderName, &'static str); 1], String) {
+    let metrics = crate::metrics::encode_metrics();
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        metrics,
+    )
 }
 
 async fn health_check(State(state): State<DaemonState>) -> Json<HealthResponse> {
@@ -1968,43 +1978,53 @@ async fn store_task_as_pattern(
     }
 }
 
-/// Execute delegations to specialist agents
+/// Execute delegations to specialist agents IN PARALLEL
+///
+/// This is the core of CCA's value - multiple agents working simultaneously.
+/// All delegations are spawned concurrently and awaited together.
 async fn execute_delegations(
     state: &DaemonState,
     delegations: &[CoordinatorDelegation],
 ) -> Vec<DelegateTaskResponse> {
-    let mut results = Vec::new();
+    use futures_util::future::join_all;
+
+    if delegations.is_empty() {
+        return Vec::new();
+    }
+
+    info!("Executing {} delegations IN PARALLEL", delegations.len());
+
+    // Phase 1: Prepare all delegations - validate roles and find/spawn agents
+    // This phase is sequential to avoid race conditions when spawning agents
+    let mut prepared: Vec<(CoordinatorDelegation, AgentId)> = Vec::new();
+    let mut errors: Vec<DelegateTaskResponse> = Vec::new();
 
     for delegation in delegations {
-        info!("Executing delegation to {}: {}", delegation.role,
+        info!("Preparing delegation to {}: {}", delegation.role,
               safe_truncate(&delegation.task, 50));
 
-        // Validate role (must be a known role)
-        let _role = match delegation.role.to_lowercase().as_str() {
-            "frontend" => AgentRole::Frontend,
-            "backend" => AgentRole::Backend,
-            "dba" => AgentRole::DBA,
-            "devops" => AgentRole::DevOps,
-            "security" => AgentRole::Security,
-            "qa" => AgentRole::QA,
-            _ => {
-                results.push(DelegateTaskResponse {
-                    success: false,
-                    agent_id: String::new(),
-                    role: delegation.role.clone(),
-                    output: None,
-                    error: Some(format!("Unknown role: {}", delegation.role)),
-                    duration_ms: 0,
-                    tokens_used: 0,
-                });
-                continue;
-            }
-        };
+        // Validate role
+        let valid_role = matches!(
+            delegation.role.to_lowercase().as_str(),
+            "frontend" | "backend" | "dba" | "devops" | "security" | "qa"
+        );
 
-        let start = std::time::Instant::now();
+        if !valid_role {
+            errors.push(DelegateTaskResponse {
+                success: false,
+                agent_id: String::new(),
+                role: delegation.role.clone(),
+                output: None,
+                error: Some(format!("Unknown role: {}", delegation.role)),
+                duration_ms: 0,
+                tokens_used: 0,
+            });
+            continue;
+        }
 
-        // Find an available (not busy) agent with this role
-        let agent_id = find_available_agent(state, &delegation.role).await;
+        // Find an available agent (not already assigned in this batch)
+        let already_assigned: Vec<AgentId> = prepared.iter().map(|(_, id)| *id).collect();
+        let agent_id = find_available_agent_excluding(state, &delegation.role, &already_assigned).await;
 
         let agent_id = match agent_id {
             Some(id) => {
@@ -2014,11 +2034,10 @@ async fn execute_delegations(
             None => {
                 // No available agent - try to spawn one via tmux
                 if state.tmux_manager.is_available() {
-                    // Check how many tmux-spawned agents we have for this role already
                     let existing_tmux_agents = state.tmux_manager.agents_by_role(&delegation.role).await;
-                    if existing_tmux_agents.len() >= 2 {
-                        // Don't spawn more than 2 agents per role via tmux
-                        results.push(DelegateTaskResponse {
+                    // Allow more agents for parallel work (up to 5 per role)
+                    if existing_tmux_agents.len() >= 5 {
+                        errors.push(DelegateTaskResponse {
                             success: false,
                             agent_id: String::new(),
                             role: delegation.role.clone(),
@@ -2027,33 +2046,43 @@ async fn execute_delegations(
                                 "No available {} agent. {} agents spawned but all busy.",
                                 delegation.role, existing_tmux_agents.len()
                             )),
-                            duration_ms: start.elapsed().as_millis() as u64,
+                            duration_ms: 0,
                             tokens_used: 0,
                         });
                         continue;
                     }
 
-                    info!("No available {} agent, attempting to spawn via tmux (existing: {})",
+                    info!("No available {} agent, spawning via tmux (existing: {})",
                           delegation.role, existing_tmux_agents.len());
                     match state.tmux_manager.spawn_agent(&delegation.role).await {
                         Ok(pane_id) => {
                             info!("Spawned {} agent in tmux pane {}", delegation.role, pane_id);
-                            // Wait a bit for the agent to connect
-                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                            // Try to find it again
-                            match state.acp_server.find_agent_by_role(&delegation.role).await {
+                            // Wait for the agent to connect with retries
+                            let mut new_agent_id = None;
+                            for attempt in 1..=5 {
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                // Find an available agent that's NOT already assigned
+                                if let Some(id) = find_available_agent_excluding(
+                                    state,
+                                    &delegation.role,
+                                    &already_assigned,
+                                ).await {
+                                    new_agent_id = Some(id);
+                                    break;
+                                }
+                                info!("Waiting for {} agent to connect (attempt {}/5)", delegation.role, attempt);
+                            }
+                            match new_agent_id {
                                 Some(id) => id,
                                 None => {
-                                    warn!("Spawned agent hasn't connected yet");
-                                    results.push(DelegateTaskResponse {
+                                    warn!("Spawned agent hasn't connected after 10 seconds");
+                                    errors.push(DelegateTaskResponse {
                                         success: false,
                                         agent_id: String::new(),
                                         role: delegation.role.clone(),
                                         output: None,
-                                        error: Some(format!(
-                                            "Agent spawned but not connected. Try again in a moment."
-                                        )),
-                                        duration_ms: start.elapsed().as_millis() as u64,
+                                        error: Some("Agent spawned but not connected. Try again.".to_string()),
+                                        duration_ms: 0,
                                         tokens_used: 0,
                                     });
                                     continue;
@@ -2062,7 +2091,7 @@ async fn execute_delegations(
                         }
                         Err(e) => {
                             warn!("Failed to spawn {} agent via tmux: {}", delegation.role, e);
-                            results.push(DelegateTaskResponse {
+                            errors.push(DelegateTaskResponse {
                                 success: false,
                                 agent_id: String::new(),
                                 role: delegation.role.clone(),
@@ -2071,16 +2100,15 @@ async fn execute_delegations(
                                     "No {} agent available. Start one with: cca agent worker {}",
                                     delegation.role, delegation.role
                                 )),
-                                duration_ms: start.elapsed().as_millis() as u64,
+                                duration_ms: 0,
                                 tokens_used: 0,
                             });
                             continue;
                         }
                     }
                 } else {
-                    warn!("No {} agent connected. Start one with: cca agent worker {}",
-                          delegation.role, delegation.role);
-                    results.push(DelegateTaskResponse {
+                    warn!("No {} agent connected and tmux not available", delegation.role);
+                    errors.push(DelegateTaskResponse {
                         success: false,
                         agent_id: String::new(),
                         role: delegation.role.clone(),
@@ -2089,7 +2117,7 @@ async fn execute_delegations(
                             "No {} agent connected. Start one with: cca agent worker {}",
                             delegation.role, delegation.role
                         )),
-                        duration_ms: start.elapsed().as_millis() as u64,
+                        duration_ms: 0,
                         tokens_used: 0,
                     });
                     continue;
@@ -2097,39 +2125,74 @@ async fn execute_delegations(
             }
         };
 
-        // Mark agent as busy
-        {
-            let mut busy = state.busy_agents.write().await;
-            busy.insert(agent_id, delegation.task.clone());
-        }
+        prepared.push((delegation.clone(), agent_id));
+    }
 
-        // P1: Update Redis activity - agent is now working on task
+    if prepared.is_empty() {
+        return errors;
+    }
+
+    // Phase 2: Mark all agents as busy BEFORE spawning tasks
+    {
+        let mut busy = state.busy_agents.write().await;
+        for (delegation, agent_id) in &prepared {
+            busy.insert(*agent_id, delegation.task.clone());
+        }
+    }
+
+    // Update Redis state for all agents
+    for (delegation, agent_id) in &prepared {
         update_agent_redis_state(
             &state.redis,
-            agent_id,
+            *agent_id,
             &delegation.role,
             "busy",
             Some(TaskId::new()),
         ).await;
+    }
 
-        info!("Sending task to {} agent {} via WebSocket", delegation.role, agent_id);
+    // Phase 3: Spawn ALL tasks concurrently
+    info!("Spawning {} tasks concurrently", prepared.len());
+    let timeout = std::time::Duration::from_secs(state.config.agents.default_timeout_seconds);
 
-        // Send task via WebSocket
-        let timeout = std::time::Duration::from_secs(state.config.agents.default_timeout_seconds);
-        let result = state.acp_server.send_task(
-            agent_id,
-            &delegation.task,
-            delegation.context.as_deref(),
-            timeout,
-        ).await;
+    let task_futures: Vec<_> = prepared
+        .iter()
+        .map(|(delegation, agent_id)| {
+            let state = state.clone();
+            let delegation = delegation.clone();
+            let agent_id = *agent_id;
+            let timeout = timeout;
 
-        // Record result and unmark agent as busy
+            async move {
+                let start = std::time::Instant::now();
+                info!("Sending task to {} agent {} via WebSocket", delegation.role, agent_id);
+
+                let result = state.acp_server.send_task(
+                    agent_id,
+                    &delegation.task,
+                    delegation.context.as_deref(),
+                    timeout,
+                ).await;
+
+                (delegation, agent_id, start, result)
+            }
+        })
+        .collect();
+
+    // Phase 4: Await ALL tasks together (this is where parallelism happens)
+    let task_results = join_all(task_futures).await;
+
+    // Phase 5: Process results and cleanup
+    let mut results = errors; // Start with any errors from preparation phase
+
+    for (delegation, agent_id, start, result) in task_results {
+        // Unmark agent as busy
         {
             let mut busy = state.busy_agents.write().await;
             busy.remove(&agent_id);
         }
 
-        // P1: Update Redis activity - agent is now idle
+        // Update Redis - agent is now idle
         update_agent_redis_state(
             &state.redis,
             agent_id,
@@ -2144,9 +2207,10 @@ async fn execute_delegations(
                 let tokens_used = task_response.tokens_used;
                 let output = task_response.output;
 
-                info!("{} agent completed task in {}ms (tokens: {})", delegation.role, duration_ms, tokens_used);
+                info!("{} agent {} completed task in {}ms (tokens: {})",
+                      delegation.role, agent_id, duration_ms, tokens_used);
 
-                // P1: Track token usage from worker response
+                // Track token usage
                 if tokens_used > 0 {
                     use crate::tokens::TokenUsage;
                     let usage = TokenUsage {
@@ -2160,9 +2224,9 @@ async fn execute_delegations(
                     state.token_service.metrics.record(usage).await;
                 }
 
-                // P2: Store successful output as a pattern in ReasoningBank
+                // Store as pattern in ReasoningBank
                 store_task_as_pattern(
-                    state,
+                    &state,
                     agent_id,
                     &delegation.role,
                     &delegation.task,
@@ -2182,7 +2246,7 @@ async fn execute_delegations(
             }
             Err(e) => {
                 let error_msg = e.to_string();
-                warn!("{} agent error: {}", delegation.role, error_msg);
+                warn!("{} agent {} error: {}", delegation.role, agent_id, error_msg);
                 results.push(DelegateTaskResponse {
                     success: false,
                     agent_id: agent_id.to_string(),
@@ -2196,19 +2260,35 @@ async fn execute_delegations(
         }
     }
 
+    info!("All {} delegations completed", results.len());
     results
 }
 
 /// Find an available (not busy) agent with the specified role
 async fn find_available_agent(state: &DaemonState, role: &str) -> Option<AgentId> {
+    find_available_agent_excluding(state, role, &[]).await
+}
+
+/// Find an available (not busy) agent with the specified role, excluding specific agents
+///
+/// This is critical for parallel task assignment - we need to exclude agents
+/// that have already been assigned tasks in the current batch, even if they
+/// haven't been marked as "busy" yet.
+async fn find_available_agent_excluding(
+    state: &DaemonState,
+    role: &str,
+    exclude: &[AgentId],
+) -> Option<AgentId> {
     let agents_with_roles = state.acp_server.agents_with_roles().await;
 
-    // Find matching agent that's not busy
+    // Find matching agent that's not busy AND not in the exclusion list
     let found_agent = {
         let busy_agents = state.busy_agents.read().await;
         agents_with_roles.into_iter().find(|(agent_id, agent_role)| {
             if let Some(r) = agent_role {
-                r.to_lowercase() == role.to_lowercase() && !busy_agents.contains_key(agent_id)
+                r.to_lowercase() == role.to_lowercase()
+                    && !busy_agents.contains_key(agent_id)
+                    && !exclude.contains(agent_id)
             } else {
                 false
             }
@@ -2218,7 +2298,7 @@ async fn find_available_agent(state: &DaemonState, role: &str) -> Option<AgentId
     if let Some((agent_id, agent_role)) = found_agent {
         let role_name = agent_role.unwrap_or_default();
 
-        // FIX 2: Ensure agent is registered in orchestrator for workload tracking
+        // Ensure agent is registered in orchestrator for workload tracking
         let orchestrator = state.orchestrator.read().await;
         let workloads = orchestrator.get_agent_workloads().await;
 

@@ -1,6 +1,59 @@
 # CCA Architecture
 
-This document provides a comprehensive overview of the CCA system architecture with detailed diagrams.
+This document provides a comprehensive overview of the CCA (Claude Code Agentic) system architecture, including system design, component interactions, data flow, technology stack, and deployment architecture.
+
+> **Related Documentation:**
+> - [Data Flow](./data-flow.md) - Detailed data flow diagrams
+> - [Communication Protocols](./protocols.md) - ACP and MCP protocol specifications
+> - [Deployment Guide](./deployment.md) - Setup and deployment instructions
+> - [Security Hardening](./security-hardening.md) - Security best practices
+> - Component documentation in [docs/components/](./components/)
+
+---
+
+## Table of Contents
+
+1. [System Design Overview](#system-design-overview)
+2. [High-Level Architecture](#high-level-architecture)
+3. [Core Components](#core-components)
+4. [Component Interactions](#component-interactions)
+5. [Data Architecture](#data-architecture)
+6. [Communication Protocols](#communication-protocols)
+7. [Reinforcement Learning System](#reinforcement-learning-system)
+8. [Token Efficiency System](#token-efficiency-system)
+9. [Technology Stack](#technology-stack)
+10. [Deployment Architecture](#deployment-architecture)
+11. [Security Architecture](#security-architecture)
+12. [Performance & Scalability](#performance--scalability)
+13. [Architectural Patterns](#architectural-patterns)
+
+---
+
+## System Design Overview
+
+CCA is a **next-generation multi-agent orchestration system** for Claude Code, designed to manage multiple real Claude Code instances (not simulated agents) through a unified **Command Center architecture**.
+
+### Design Principles
+
+1. **Real Agent Instances**: Each agent is a genuine Claude Code process, not a simulation
+2. **Separation of Concerns**: Clear boundaries between components via distinct crates
+3. **Async-First**: Built on Tokio for high-performance concurrent operations
+4. **Learning System**: Integrated RL for continuous improvement in task routing
+5. **Enterprise Storage**: PostgreSQL with pgvector for semantic search capabilities
+6. **Real-Time Communication**: WebSocket-based Agent Communication Protocol (ACP)
+7. **Security by Default**: Granular permission controls for agent capabilities
+
+### Key Capabilities
+
+| Capability | Description |
+|------------|-------------|
+| **Multi-Agent Orchestration** | Spawn and manage specialized Claude Code instances |
+| **ReasoningBank** | Semantic pattern storage and retrieval with pgvector |
+| **RL-Based Routing** | Learn optimal task-to-agent routing over time |
+| **Token Efficiency** | Monitor and optimize context token usage |
+| **Real-Time Coordination** | WebSocket-based agent communication |
+
+---
 
 ## High-Level Architecture
 
@@ -10,93 +63,135 @@ graph TB
         CC[Command Center<br/>Claude Code + CCA Plugin]
     end
 
-    subgraph "CCA System"
-        MCP[MCP Server<br/>cca-mcp]
-        Daemon[CCA Daemon<br/>cca-daemon]
-        ACP[ACP WebSocket Server<br/>cca-acp]
+    subgraph "Protocol Layer"
+        MCP[MCP Server<br/>cca-mcp<br/>JSON-RPC over stdio]
+    end
+
+    subgraph "CCA System Core"
+        Daemon[CCA Daemon<br/>cca-daemon<br/>HTTP API :9200]
+        ACP[ACP Server<br/>cca-acp<br/>WebSocket :9100]
         RL[RL Engine<br/>cca-rl]
-        EMB[Embedding Service]
+        Core[Core Types<br/>cca-core]
     end
 
     subgraph "Agent Layer"
-        Coord[Coordinator Agent]
-        FE[Frontend Agent]
-        BE[Backend Agent]
-        Sec[Security Agent]
-        QA[QA Agent]
+        Coord[Coordinator Agent<br/>Task Analysis & Routing]
+        FE[Frontend Agent<br/>UI/UX Specialist]
+        BE[Backend Agent<br/>API/Services Specialist]
+        Sec[Security Agent<br/>Security Review]
+        QA[QA Agent<br/>Testing Specialist]
     end
 
     subgraph "Data Layer"
-        Redis[(Redis<br/>Session State)]
-        PG[(PostgreSQL<br/>ReasoningBank + pgvector)]
+        Redis[(Redis<br/>Session State<br/>Pub/Sub<br/>:6380)]
+        PG[(PostgreSQL<br/>pgvector<br/>ReasoningBank<br/>:5433)]
     end
 
     subgraph "External Services"
-        Ollama[Ollama<br/>nomic-embed-text]
+        Ollama[Ollama<br/>nomic-embed-text<br/>:11434]
     end
 
     CC -->|MCP Tools| MCP
     MCP -->|HTTP API| Daemon
-    Daemon -->|Spawn/Manage| Coord
-    Daemon -->|Spawn/Manage| FE
-    Daemon -->|Spawn/Manage| BE
-    Daemon -->|Spawn/Manage| Sec
-    Daemon -->|Spawn/Manage| QA
 
-    Coord <-->|ACP WebSocket| ACP
-    FE <-->|ACP WebSocket| ACP
-    BE <-->|ACP WebSocket| ACP
-    Sec <-->|ACP WebSocket| ACP
-    QA <-->|ACP WebSocket| ACP
+    Daemon -->|Spawn/Manage via PTY| Coord
+    Daemon -->|Spawn/Manage via PTY| FE
+    Daemon -->|Spawn/Manage via PTY| BE
+    Daemon -->|Spawn/Manage via PTY| Sec
+    Daemon -->|Spawn/Manage via PTY| QA
+
+    Coord <-->|WebSocket| ACP
+    FE <-->|WebSocket| ACP
+    BE <-->|WebSocket| ACP
+    Sec <-->|WebSocket| ACP
+    QA <-->|WebSocket| ACP
 
     Daemon -->|Cache/Pub-Sub| Redis
-    Daemon -->|Patterns/Tasks| PG
+    Daemon -->|Patterns/Tasks/RL| PG
 
-    EMB -->|Generate Embeddings| Ollama
-    Daemon --> EMB
-    EMB --> PG
-
+    Daemon -->|Embeddings| Ollama
     RL --> Daemon
-    Daemon --> RL
+    Core --> Daemon
+    Core --> ACP
+    Core --> RL
 ```
 
-## Component Architecture
+### Crate Dependency Graph
 
-### CCA Daemon (Core Service)
+```mermaid
+graph BT
+    Core[cca-core<br/>Core types & traits]
+    ACP[cca-acp<br/>WebSocket server/client]
+    RL[cca-rl<br/>RL algorithms]
+    MCP[cca-mcp<br/>MCP protocol server]
+    Daemon[cca-daemon<br/>Main orchestration]
+    CLI[cca-cli<br/>Command line tool]
+
+    ACP --> Core
+    RL --> Core
+    MCP --> Core
+    Daemon --> Core
+    Daemon --> ACP
+    Daemon --> RL
+    CLI --> Core
+
+    style Core fill:#e1f5fe
+    style Daemon fill:#fff3e0
+```
+
+---
+
+## Core Components
+
+### Component Overview
+
+| Crate | Purpose | Key Responsibilities | Documentation |
+|-------|---------|---------------------|---------------|
+| **cca-core** | Foundation | Types, traits, error handling | [cca-core.md](./components/cca-core.md) |
+| **cca-daemon** | Orchestration | HTTP API, agent management, services | [cca-daemon.md](./components/cca-daemon.md) |
+| **cca-acp** | Communication | WebSocket server/client, messaging | [cca-acp.md](./components/cca-acp.md) |
+| **cca-mcp** | Integration | Claude Code plugin, tool exposure | [cca-mcp.md](./components/cca-mcp.md) |
+| **cca-rl** | Learning | RL algorithms, experience management | [cca-rl.md](./components/cca-rl.md) |
+| **cca-cli** | CLI | Terminal interface for management | [cca-cli.md](./components/cca-cli.md) |
+
+### CCA Daemon Architecture
+
+The daemon is the central orchestration service coordinating all CCA operations.
 
 ```mermaid
 graph TB
-    subgraph "CCA Daemon"
-        HTTP[HTTP API Server<br/>axum]
+    subgraph "CCA Daemon (cca-daemon)"
+        HTTP[HTTP API Server<br/>Axum + Tower]
 
-        subgraph "Core Components"
-            AM[Agent Manager]
-            Orch[Orchestrator]
-            TS[Token Service]
-            ES[Embedding Service]
+        subgraph "Core Services"
+            AM[Agent Manager<br/>PTY/Process Control]
+            Orch[Orchestrator<br/>Task Routing & Delegation]
+            TS[Token Service<br/>Efficiency Optimization]
+            ES[Embedding Service<br/>Vector Generation]
+            Auth[Auth Middleware<br/>API Key Validation]
         end
 
         subgraph "External Connections"
-            ACP[ACP Server]
-            RLS[RL Service]
-            REDIS[Redis Services]
-            PGS[PostgreSQL Services]
-            OLL[Ollama API]
+            ACPS[ACP Server<br/>WebSocket :9100]
+            RLS[RL Service<br/>Learning Engine]
+            RDS[Redis Services<br/>State & Pub/Sub]
+            PGS[PostgreSQL Services<br/>Persistence]
+            OLL[Ollama Client<br/>Embeddings API]
         end
     end
 
     HTTP --> AM
     HTTP --> Orch
     HTTP --> TS
-    HTTP --> RLS
+    HTTP --> Auth
 
     AM -->|PTY Management| Agents[Claude Code Instances]
     Orch -->|Task Routing| AM
-    Orch --> ACP
+    Orch --> ACPS
     Orch --> RLS
-    Orch --> REDIS
+    Orch --> RDS
 
-    TS --> REDIS
+    TS --> RDS
     RLS --> PGS
     ES -->|nomic-embed-text| OLL
     ES --> PGS
@@ -104,7 +199,7 @@ graph TB
 
 ### Agent Manager
 
-The Agent Manager handles spawning and managing Claude Code instances using PTY (pseudo-terminal).
+The Agent Manager handles spawning and lifecycle management of Claude Code instances.
 
 ```mermaid
 sequenceDiagram
@@ -113,27 +208,28 @@ sequenceDiagram
     participant PTY as PTY System
     participant CC as Claude Code
 
+    Note over D,CC: Agent Spawning
     D->>AM: spawn(role: Backend)
     AM->>PTY: openpty()
-    PTY-->>AM: PtyPair
+    PTY-->>AM: PtyPair (master/slave)
+    AM->>AM: Build command with permissions
     AM->>CC: spawn_command(claude)
     CC-->>AM: Child Process
     AM->>AM: Create PtyHandle
-    AM-->>D: AgentId
+    AM-->>D: AgentId (UUID)
 
-    Note over D,CC: Agent Communication
-
-    D->>AM: send(agent_id, message)
-    AM->>PTY: write(message)
+    Note over D,CC: Task Communication
+    D->>AM: send(agent_id, task_message)
+    AM->>PTY: write to master
     PTY->>CC: stdin
     CC->>PTY: stdout
     PTY-->>AM: response
-    AM-->>D: response
+    AM-->>D: task_result
 ```
 
 ### Orchestrator
 
-The Orchestrator handles task routing, delegation, and result aggregation.
+The Orchestrator handles intelligent task routing with RL integration.
 
 ```mermaid
 graph TB
@@ -142,23 +238,24 @@ graph TB
         WM[Workload Manager]
         RA[Result Aggregator]
 
-        subgraph "RL Integration"
-            RL[RL Service]
-            SB[State Builder]
+        subgraph "Routing Strategies"
+            RLR[RL-Based Routing<br/>State → Action]
+            HEU[Heuristic Routing<br/>Load Balancing]
         end
     end
 
     Task[Incoming Task] --> TR
-    TR -->|RL Routing| RL
-    RL --> SB
-    SB --> TR
-    TR -->|Heuristic Fallback| WM
-    WM -->|Select Agent| Agent[Agent]
+    TR -->|Primary| RLR
+    RLR -->|Fallback| HEU
+    TR --> WM
+    WM -->|Select Agent| Agent[Best Agent]
     Agent --> RA
     RA --> Result[Aggregated Result]
 ```
 
-## Communication Flow
+---
+
+## Component Interactions
 
 ### Task Execution Flow
 
@@ -167,59 +264,83 @@ sequenceDiagram
     participant User
     participant CC as Command Center
     participant MCP as MCP Server
-    participant D as Daemon
+    participant D as Daemon API
+    participant O as Orchestrator
     participant C as Coordinator
     participant A as Specialist Agent
-    participant DB as PostgreSQL
+    participant RL as RL Engine
+    participant PG as PostgreSQL
 
+    Note over User,PG: 1. Task Creation
     User->>CC: "Add authentication to API"
-    CC->>MCP: cca_task(description)
+    CC->>MCP: cca_task(description, priority)
     MCP->>D: POST /api/v1/tasks
-    D->>D: Find/Spawn Coordinator
-    D->>C: Send task via PTY
+
+    Note over D,C: 2. Task Assignment
+    D->>D: Create TaskState
+    D->>O: Find/spawn Coordinator
+    O->>C: Send task via PTY
+
+    Note over C,A: 3. Task Delegation
     C->>C: Analyze requirements
-    C->>D: Route to Backend agent
-    D->>A: Delegate subtask
+    C->>O: Request delegation to Backend
+    O->>RL: Build state, get routing prediction
+    RL-->>O: Action: RouteToAgent(Backend)
+    O->>A: Delegate via ACP WebSocket
+
+    Note over A,PG: 4. Task Execution
     A->>A: Execute task
-    A-->>D: Task result
-    D->>DB: Store pattern
-    D-->>MCP: TaskResponse
-    MCP-->>CC: Result JSON
+    A-->>O: Task result via ACP
+
+    Note over O,PG: 5. Result Processing
+    O->>RL: Record experience (state, action, reward)
+    O->>PG: Store successful pattern
+    O-->>D: Aggregated TaskResult
+
+    Note over D,User: 6. Response
+    D-->>MCP: TaskResponse JSON
+    MCP-->>CC: Result
     CC-->>User: Display result
 ```
 
-### ACP WebSocket Communication
+### Agent Communication Pathways
 
 ```mermaid
-sequenceDiagram
-    participant A as Agent
-    participant ACP as ACP Server
-    participant D as Daemon
-
-    Note over A,ACP: Connection Establishment
-    A->>ACP: WebSocket Connect
-    ACP->>ACP: Generate AgentId
-    ACP-->>A: Connection Accepted
-
-    Note over A,ACP: Heartbeat Loop
-    loop Every 30s
-        A->>ACP: heartbeat(timestamp)
-        ACP-->>A: heartbeat_response(server_time)
+graph TB
+    subgraph "Communication Channels"
+        HTTP[HTTP REST API<br/>:9200<br/>MCP ↔ Daemon]
+        WS[WebSocket ACP<br/>:9100<br/>Daemon ↔ Agents]
+        STDIO[PTY/Stdio<br/>Agent Process Control]
+        PUBSUB[Redis Pub/Sub<br/>Event Broadcasting]
     end
 
-    Note over D,A: Task Assignment
-    D->>ACP: send_to(agent_id, task_assign)
-    ACP->>A: task_assign(task_id, description)
-    A->>A: Process task
-    A->>ACP: task_result(success, output)
-    ACP->>D: Forward result
+    subgraph "Use Cases"
+        UC1[Task Creation/Status]
+        UC2[Real-time Task Assignment]
+        UC3[Agent Spawning/Control]
+        UC4[System-wide Notifications]
+    end
 
-    Note over D,A: Broadcast
-    D->>ACP: broadcast(message)
-    ACP->>A: notification(message)
+    UC1 --> HTTP
+    UC2 --> WS
+    UC3 --> STDIO
+    UC4 --> PUBSUB
 ```
 
+---
+
 ## Data Architecture
+
+### Storage Strategy
+
+| Data Type | Storage | Rationale |
+|-----------|---------|-----------|
+| Session State | Redis | Fast access, TTL support |
+| Agent Context | Redis (compressed) | Quick retrieval, 1hr TTL |
+| Patterns | PostgreSQL + pgvector | Semantic search, persistence |
+| Tasks | PostgreSQL | Audit trail, reporting |
+| RL Experiences | PostgreSQL | Training data, analysis |
+| Broadcasts | Redis Pub/Sub | Real-time, ephemeral |
 
 ### Redis Data Model
 
@@ -246,22 +367,22 @@ erDiagram
 
     CONTEXT {
         uuid agent_id FK
-        bytes compressed_context
-        int ttl_seconds
+        bytes compressed_context "LZ4"
+        int ttl_seconds "3600"
     }
 ```
 
 **Redis Key Patterns:**
 
-| Pattern | Purpose |
-|---------|---------|
-| `cca:session:{id}` | Session data |
-| `cca:agent:{id}:state` | Agent state |
-| `cca:agent:{id}:context` | Compressed context |
-| `cca:broadcast` | Broadcast channel |
-| `cca:tasks:{agent_id}` | Task queue per agent |
-| `cca:status` | Status updates |
-| `cca:coord` | Coordination messages |
+| Pattern | Purpose | TTL |
+|---------|---------|-----|
+| `cca:session:{id}` | Session data | Session lifetime |
+| `cca:agent:{id}:state` | Agent state | Heartbeat-based |
+| `cca:agent:{id}:context` | Compressed context | 1 hour |
+| `cca:broadcast` | Broadcast channel | N/A (pub/sub) |
+| `cca:tasks:{agent_id}` | Task queue | Task lifetime |
+| `cca:status` | Status updates | N/A (pub/sub) |
+| `cca:coord` | Coordination messages | N/A (pub/sub) |
 
 ### PostgreSQL Schema
 
@@ -284,12 +405,13 @@ erDiagram
         uuid agent_id FK
         varchar pattern_type
         text content
-        vector_768 embedding "nomic-embed-text via Ollama"
+        vector_768 embedding "nomic-embed-text"
         int success_count
         int failure_count
-        float success_rate
+        float success_rate "GENERATED"
         jsonb metadata
         timestamp created_at
+        timestamp updated_at
     }
 
     TASKS {
@@ -324,507 +446,570 @@ erDiagram
     }
 ```
 
-## Semantic Search with Embeddings
-
-CCA uses vector embeddings to enable semantic similarity search for patterns in the ReasoningBank. This allows the system to find relevant patterns based on meaning rather than exact keyword matches.
-
-### Embedding Service Architecture
-
-```mermaid
-graph TB
-    subgraph "Embedding Service"
-        ES[EmbeddingService]
-        OC[Ollama Client]
-        HC[Health Check]
-    end
-
-    subgraph "Ollama Server"
-        OA[Ollama API<br/>:11434]
-        NE[nomic-embed-text<br/>768 dimensions]
-    end
-
-    subgraph "Data Layer"
-        PG[(PostgreSQL<br/>pgvector)]
-        PT[patterns table<br/>vector(768)]
-    end
-
-    ES -->|HTTP POST /api/embeddings| OC
-    OC -->|embed request| OA
-    OA --> NE
-    NE -->|768-dim vector| OC
-    OC -->|Vec<f32>| ES
-
-    ES -->|store embedding| PT
-    PT --> PG
-```
-
-### Configuration
-
-The embedding service is configured via the `[embeddings]` section in `cca.toml`:
-
-```toml
-[embeddings]
-# Enable/disable embeddings (default: false)
-enabled = true
-
-# Ollama API base URL
-ollama_url = "http://localhost:11434"
-
-# Embedding model (nomic-embed-text produces 768-dim vectors)
-model = "nomic-embed-text:latest"
-
-# Expected embedding dimension (must match model output)
-dimension = 768
-```
-
-Environment variables can also be used:
-- `CCA__EMBEDDINGS__ENABLED=true`
-- `CCA__EMBEDDINGS__OLLAMA_URL=http://localhost:11434`
-- `CCA__EMBEDDINGS__MODEL=nomic-embed-text:latest`
-- `CCA__EMBEDDINGS__DIMENSION=768`
-
-### EmbeddingService API
-
-The `EmbeddingService` provides the following capabilities:
-
-| Method | Description |
-|--------|-------------|
-| `embed(text)` | Generate embedding for a single text |
-| `embed_batch(texts)` | Generate embeddings for multiple texts |
-| `health_check()` | Verify Ollama connectivity |
-| `dimension()` | Get configured dimension (768) |
-| `model()` | Get model name |
-
-### Pattern Storage with Embeddings
-
-Patterns are stored in PostgreSQL using the `pgvector` extension:
+### Semantic Search with Embeddings
 
 ```mermaid
 sequenceDiagram
+    participant Q as Query
     participant D as Daemon
-    participant ES as EmbeddingService
+    participant ES as Embedding Service
     participant OL as Ollama
-    participant DB as PostgreSQL
+    participant PG as PostgreSQL
 
-    D->>ES: embed(pattern_content)
+    Q->>D: search("authentication patterns")
+    D->>ES: embed(query_text)
     ES->>OL: POST /api/embeddings
     OL-->>ES: {embedding: [f32; 768]}
-    ES-->>D: Vec<f32>
-    D->>DB: INSERT patterns (content, embedding)
-    DB-->>D: pattern_id
-```
-
-### Semantic Similarity Search
-
-The system uses cosine similarity to find relevant patterns:
-
-```mermaid
-sequenceDiagram
-    participant U as User Query
-    participant D as Daemon
-    participant ES as EmbeddingService
-    participant DB as PostgreSQL
-
-    U->>D: search("authentication patterns")
-    D->>ES: embed(query)
     ES-->>D: query_embedding
-    D->>DB: SELECT * FROM patterns<br/>ORDER BY embedding <=> query_embedding<br/>WHERE similarity >= threshold
-    DB-->>D: matching patterns with scores
-    D-->>U: PatternWithScore[]
+
+    D->>PG: SELECT * FROM patterns<br/>ORDER BY embedding <=> query_embedding<br/>WHERE 1 - (embedding <=> query) >= 0.7<br/>LIMIT 10
+    PG-->>D: PatternWithScore[]
+    D-->>Q: Ranked results with similarity
 ```
 
-The PostgreSQL query uses IVFFlat indexing for efficient vector search:
-
-```sql
--- Cosine similarity search
-SELECT *, 1 - (embedding <=> $1) as similarity
-FROM patterns
-WHERE embedding IS NOT NULL
-  AND 1 - (embedding <=> $1) >= $min_similarity
-ORDER BY embedding <=> $1
-LIMIT $limit
-```
-
-### Integration with ReasoningBank
-
-Embeddings enhance the ReasoningBank's pattern retrieval:
-
-```mermaid
-graph LR
-    subgraph "Pattern Operations"
-        C[Create Pattern] -->|generate embedding| E[Store with Vector]
-        Q[Query Patterns] -->|semantic search| S[Similarity Match]
-        B[Backfill] -->|batch embed| U[Update Missing]
-    end
-
-    subgraph "Pattern Repository"
-        CR[create(content, embedding)]
-        SS[search_similar(embedding, limit, threshold)]
-        UE[update_embedding(id, embedding)]
-        GW[get_without_embeddings(limit)]
-    end
-
-    C --> CR
-    Q --> SS
-    B --> GW
-    B --> UE
-```
-
-### Model Details: nomic-embed-text
+**Vector Search Configuration:**
 
 | Property | Value |
 |----------|-------|
+| Model | nomic-embed-text:latest |
 | Dimensions | 768 |
-| Context Length | 8192 tokens |
-| Similarity Metric | Cosine |
-| Provider | Ollama (local) |
+| Index Type | IVFFlat |
+| Distance Metric | Cosine |
+| Index Lists | 100 |
 
-The model is run locally via Ollama, providing:
-- **Privacy**: No data leaves your infrastructure
-- **Performance**: Local inference without network latency
-- **Cost**: No per-token API costs
+---
 
-## Database Schema: Embeddings Storage
+## Communication Protocols
 
-CCA stores vector embeddings in PostgreSQL using the `pgvector` extension. This section documents the schema design and migration path.
+### ACP (Agent Communication Protocol)
 
-### pgvector Extension Setup
+WebSocket-based real-time communication between daemon and agents.
 
-The `pgvector` extension is enabled in the initial migration (`migrations/init.sql`):
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant ACP as ACP Server
+    participant D as Daemon
 
-```sql
--- Enable required extensions
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS "vector";
+    Note over A,ACP: Connection Establishment
+    A->>ACP: WebSocket Connect ws://localhost:9100
+    ACP->>ACP: Assign connection ID
+    ACP-->>A: Connection Accepted
+
+    Note over A,ACP: Heartbeat Loop (30s)
+    loop Every 30 seconds
+        A->>ACP: {method: "heartbeat", params: {timestamp}}
+        ACP-->>A: {result: {server_time, status: "ok"}}
+    end
+
+    Note over D,A: Task Assignment
+    D->>ACP: send_to(agent_id, task_assign)
+    ACP->>A: {method: "task_assign", params: {task_id, description}}
+    A->>A: Execute task
+    A->>ACP: {method: "task_result", params: {task_id, success, output}}
+    ACP->>D: Forward result
+
+    Note over D,A: Broadcast
+    D->>ACP: broadcast(message)
+    ACP->>A: {method: "notification", params: {message}}
 ```
 
-### Patterns Table with Embeddings
+**ACP Message Types:**
 
-The `patterns` table stores embeddings alongside pattern content:
+| Method | Direction | Purpose |
+|--------|-----------|---------|
+| `task_assign` | Server → Agent | Assign task to agent |
+| `task_result` | Agent → Server | Return task result |
+| `heartbeat` | Bidirectional | Keep-alive signal |
+| `broadcast` | Server → All | System-wide message |
+| `health_check` | Server → Agent | Verify agent status |
 
-```sql
-CREATE TABLE IF NOT EXISTS patterns (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
-    pattern_type VARCHAR(50) NOT NULL,
-    content TEXT NOT NULL,
-    embedding vector(768),  -- nomic-embed-text dimension (via Ollama)
-    success_count INTEGER DEFAULT 0,
-    failure_count INTEGER DEFAULT 0,
-    success_rate FLOAT GENERATED ALWAYS AS (
-        CASE WHEN success_count + failure_count > 0
-        THEN success_count::FLOAT / (success_count + failure_count)
-        ELSE 0 END
-    ) STORED,
-    metadata JSONB DEFAULT '{}',
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-```
+### MCP (Model Context Protocol)
 
-**Key columns:**
+JSON-RPC 2.0 over stdio for Claude Code integration.
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `embedding` | `vector(768)` | nomic-embed-text embedding from Ollama |
-| `content` | `TEXT` | Pattern text content that was embedded |
-| `success_rate` | `FLOAT` | Auto-computed success ratio |
+**Exposed MCP Tools:**
 
-### IVFFlat Index for Vector Search
+| Tool | Parameters | Description |
+|------|------------|-------------|
+| `cca_task` | description, priority? | Create and route task |
+| `cca_status` | task_id? | Get task/system status |
+| `cca_agents` | - | List running agents |
+| `cca_activity` | - | Get agent activity |
+| `cca_memory` | query, limit? | Search ReasoningBank |
+| `cca_broadcast` | message | Broadcast to all agents |
+| `cca_acp_status` | - | ACP connection status |
+| `cca_workloads` | - | Agent workload info |
+| `cca_rl_status` | - | RL engine status |
+| `cca_rl_train` | - | Trigger RL training |
+| `cca_rl_algorithm` | algorithm | Set RL algorithm |
+| `cca_tokens_analyze` | content | Analyze token usage |
+| `cca_tokens_compress` | content, strategies? | Compress content |
+| `cca_tokens_metrics` | - | Token efficiency metrics |
+| `cca_tokens_recommendations` | - | Efficiency recommendations |
+| `cca_index_codebase` | path, extensions?, exclude? | Index code for search |
+| `cca_search_code` | query, language?, limit? | Semantic code search |
 
-An IVFFlat index enables efficient cosine similarity search:
+> **See Also:** [API Reference](./api-reference.md) for complete tool documentation.
 
-```sql
-CREATE INDEX IF NOT EXISTS idx_patterns_embedding ON patterns
-    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-```
+---
 
-**Index configuration:**
+## Reinforcement Learning System
 
-| Parameter | Value | Purpose |
-|-----------|-------|---------|
-| `ivfflat` | - | Approximate nearest neighbor index |
-| `vector_cosine_ops` | - | Cosine distance operator class |
-| `lists = 100` | - | Number of IVF lists for partitioning |
-
-### Migration: 768-Dimension Update
-
-The migration `migrations/002_embedding_dimension_768.sql` updates the schema from OpenAI's 1536 dimensions to Ollama's 768 dimensions:
-
-```sql
--- Migration: Change embedding dimension from 1536 (OpenAI ada-002) to 768 (nomic-embed-text)
--- This migration is needed when switching from OpenAI embeddings to Ollama's nomic-embed-text model
-
--- Drop the existing index first (required to alter column type)
-DROP INDEX IF EXISTS idx_patterns_embedding;
-
--- Alter the column to use 768 dimensions
--- Note: This will invalidate any existing embeddings - they will need to be regenerated
-ALTER TABLE patterns
-    ALTER COLUMN embedding TYPE vector(768);
-
--- Recreate the index with the new dimension
-CREATE INDEX IF NOT EXISTS idx_patterns_embedding ON patterns
-    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-
--- Update the comment to reflect the new model
-COMMENT ON COLUMN patterns.embedding IS 'nomic-embed-text embedding (768 dimensions via Ollama)';
-```
-
-**Migration notes:**
-
-1. **Index must be dropped first** - PostgreSQL requires dropping indexes before altering the column type
-2. **Existing embeddings invalidated** - Changing dimensions invalidates existing vectors; they must be regenerated
-3. **Index recreated** - The IVFFlat index is recreated with the same configuration
-
-### Rust Integration with pgvector
-
-The Rust code uses the `pgvector` crate for native binary encoding:
-
-```rust
-use pgvector::Vector;
-
-/// PERF-002: Convert f32 slice to pgvector's native Vector type
-/// This avoids expensive string formatting and parsing for embeddings.
-#[inline]
-fn to_pgvector(embedding: &[f32]) -> Vector {
-    Vector::from(embedding.to_vec())
-}
-```
-
-This provides:
-- **Binary encoding** instead of string formatting
-- **Type safety** via `pgvector::Vector`
-- **Performance** improvement over text-based embedding storage
-
-### Vector Similarity Queries
-
-The `PatternRepository` performs cosine similarity search:
-
-```rust
-// Use cosine similarity (1 - cosine_distance)
-let rows = sqlx::query_as::<_, _>(
-    r"
-    SELECT *, 1 - (embedding <=> $1) as similarity
-    FROM patterns
-    WHERE embedding IS NOT NULL
-      AND 1 - (embedding <=> $1) >= $3
-    ORDER BY embedding <=> $1
-    LIMIT $2
-    ",
-)
-.bind(&embedding_vec)
-.bind(limit)
-.bind(min_similarity)
-.fetch_all(&self.pool)
-.await?;
-```
-
-**Query details:**
-
-| Operator | Meaning |
-|----------|---------|
-| `<=>` | Cosine distance (0 = identical, 2 = opposite) |
-| `1 - (<=>)` | Cosine similarity (1 = identical, -1 = opposite) |
-
-### Dimension Comparison
-
-| Model | Dimensions | Provider | Notes |
-|-------|------------|----------|-------|
-| OpenAI ada-002 | 1536 | OpenAI API | Previous default |
-| nomic-embed-text | 768 | Ollama (local) | Current default |
-
-The 768-dimension model provides:
-- **50% storage reduction** compared to 1536 dimensions
-- **Faster index operations** with smaller vectors
-- **Local inference** without API costs
-
-## Reinforcement Learning Architecture
+### RL Architecture
 
 ```mermaid
 graph TB
-    subgraph "RL Engine"
-        Algs[Algorithm Registry]
-        QL[Q-Learning]
-        DQN[DQN]
-        PPO[PPO]
-        EB[Experience Buffer]
+    subgraph "RL Engine (cca-rl)"
+        AR[Algorithm Registry]
+        QL[Q-Learning<br/>Tabular values]
+        DQN[DQN<br/>Neural approximation]
+        PPO[PPO<br/>Policy gradient]
+        EB[Experience Buffer<br/>Batch storage]
     end
 
-    subgraph "Training Loop"
+    subgraph "Training Pipeline"
         Exp[Experience] --> EB
-        EB -->|Sample Batch| Train[Training]
-        Train --> Algs
-        Algs --> Update[Model Update]
+        EB -->|Sample Batch| Train[Training Step]
+        Train --> AR
+        AR --> Update[Model Update]
     end
 
-    subgraph "Inference"
-        State[State] --> Predict[Predict]
-        Predict --> Algs
-        Algs --> Action[Action]
+    subgraph "Inference Pipeline"
+        State[Current State] --> Predict[Predict Action]
+        Predict --> AR
+        AR --> Action[Selected Action]
     end
 
-    Algs --> QL
-    Algs --> DQN
-    Algs --> PPO
+    AR --> QL
+    AR --> DQN
+    AR --> PPO
 ```
 
-### RL State/Action Space
+### State/Action Space
 
 ```mermaid
 graph LR
-    subgraph "State Space"
-        TT[Task Type]
-        AA[Available Agents]
-        TU[Token Usage]
-        SH[Success History]
-        C[Complexity]
+    subgraph "State Space (Observations)"
+        TT[Task Type<br/>classification, code_gen, etc.]
+        AA[Available Agents<br/>roles & workloads]
+        TU[Token Usage<br/>current consumption]
+        SH[Success History<br/>per-agent rates]
+        TC[Task Complexity<br/>estimated difficulty]
     end
 
-    subgraph "Action Space"
-        RA[RouteToAgent<br/>role]
-        AT[AllocateTokens<br/>budget]
-        UP[UsePattern<br/>pattern_id]
-        CC[CompressContext<br/>strategy]
-        Comp[Composite<br/>actions]
+    subgraph "Action Space (Decisions)"
+        RA[RouteToAgent<br/>Select role]
+        AT[AllocateTokens<br/>Set budget]
+        UP[UsePattern<br/>Retrieve pattern]
+        CC[CompressContext<br/>Apply strategy]
+        CP[Composite<br/>Multiple actions]
     end
 
-    TT --> Decision[RL Decision]
+    TT --> Decision[RL Decision Engine]
     AA --> Decision
     TU --> Decision
     SH --> Decision
-    C --> Decision
+    TC --> Decision
 
     Decision --> RA
     Decision --> AT
     Decision --> UP
     Decision --> CC
-    Decision --> Comp
+    Decision --> CP
 ```
+
+### Reward Computation
+
+```
+base_reward = +1.0 if success, -0.5 if failure
+token_bonus = (tokens_used < budget) * 0.2
+speed_bonus = (completion_time < baseline) * 0.1
+total_reward = base_reward + token_bonus + speed_bonus
+```
+
+**Supported Algorithms:**
+
+| Algorithm | Type | Best For |
+|-----------|------|----------|
+| Q-Learning | Tabular | Small state spaces, fast learning |
+| DQN | Neural | Larger state spaces, generalization |
+| PPO | Policy Gradient | Complex decisions, stability |
+
+> **See Also:** [cca-rl.md](./components/cca-rl.md) for detailed RL documentation.
+
+---
 
 ## Token Efficiency System
 
 ```mermaid
 graph TB
     subgraph "Token Service"
-        AN[Analyzer]
-        CT[Counter]
-        CP[Compressor]
-        MT[Metrics]
+        AN[Analyzer<br/>Usage analysis]
+        CT[Counter<br/>BPE estimation]
+        CP[Compressor<br/>Reduction strategies]
+        MT[Metrics<br/>Tracking & reporting]
     end
 
     Content[Input Content] --> AN
     AN -->|Token Count| CT
-    AN -->|Redundancy| CP
+    AN -->|Redundancy Detection| CP
 
-    CP -->|Strategies| S1[Remove Comments]
-    CP -->|Strategies| S2[Deduplicate]
-    CP -->|Strategies| S3[Summarize]
+    CP -->|Strategy| S1[code_comments<br/>Remove comments]
+    CP -->|Strategy| S2[deduplicate<br/>Remove repeats]
+    CP -->|Strategy| S3[summarize<br/>Condense verbose]
+    CP -->|Strategy| S4[history<br/>Trim old context]
 
     S1 --> Compressed[Compressed Output]
     S2 --> Compressed
     S3 --> Compressed
+    S4 --> Compressed
 
     CT --> MT
     Compressed --> MT
     MT --> Rec[Recommendations]
 ```
 
+**Compression Targets:**
+
+| Metric | Target |
+|--------|--------|
+| Token Reduction | 30%+ |
+| Context Compression | LZ4 |
+| Cache TTL | 1 hour |
+
+---
+
+## Technology Stack
+
+### Core Technologies
+
+| Layer | Technology | Purpose |
+|-------|------------|---------|
+| **Language** | Rust | Performance, safety |
+| **Async Runtime** | Tokio | Concurrent task handling |
+| **HTTP Framework** | Axum + Tower | REST API and middleware |
+| **WebSocket** | Tokio-Tungstenite | Real-time communication |
+| **Serialization** | Serde + serde_json | Data (de)serialization |
+| **Process Management** | portable-pty | Claude Code PTY control |
+
+### Data Layer
+
+| Component | Technology | Purpose |
+|-----------|------------|---------|
+| **Database** | PostgreSQL 16 | Primary persistence |
+| **Vector Search** | pgvector | Semantic similarity |
+| **Cache** | Redis 7 | State, pub/sub |
+| **Compression** | LZ4 | Context compression |
+
+### External Services
+
+| Service | Technology | Purpose |
+|---------|------------|---------|
+| **Embeddings** | Ollama | Local vector generation |
+| **Model** | nomic-embed-text | 768-dim embeddings |
+| **Metrics** | Prometheus | Application metrics |
+
+### Development Tools
+
+| Tool | Purpose |
+|------|---------|
+| **tree-sitter** | Code analysis/parsing |
+| **sqlx** | Database migrations/queries |
+| **tracing** | Structured logging |
+| **config** | Configuration management |
+
+---
+
 ## Deployment Architecture
+
+### Development Environment
 
 ```mermaid
 graph TB
-    subgraph "Docker Compose / External"
-        PG[PostgreSQL + pgvector<br/>port 5433]
-        RD[Redis<br/>port 6380]
-        OL[Ollama<br/>port 11434]
+    subgraph "Development Host"
+        CCAD[ccad<br/>CCA Daemon<br/>:9200]
+        ACPS[ACP Server<br/>:9100]
+        MCPS[cca-mcp<br/>stdio]
+        CC[Claude Code<br/>Command Center]
     end
 
-    subgraph "Host System"
-        CCAD[CCA Daemon<br/>port 9200]
-        ACPS[ACP Server<br/>port 9100]
-        MCPS[MCP Server<br/>stdio]
-    end
-
-    subgraph "Claude Code"
-        CC[Command Center]
+    subgraph "Docker Compose"
+        PG[PostgreSQL + pgvector<br/>:5433]
+        RD[Redis<br/>:6380]
+        OL[Ollama<br/>:11434]
     end
 
     CC -->|MCP Protocol| MCPS
     MCPS -->|HTTP| CCAD
-    CCAD -->|WebSocket| ACPS
+    CCAD --> ACPS
     CCAD --> PG
     CCAD --> RD
     CCAD -->|Embeddings| OL
 ```
 
-## Security Architecture
+### Production Architecture
 
 ```mermaid
 graph TB
-    subgraph "Authentication"
-        AK[API Keys]
-        AM[Auth Middleware]
+    subgraph "Load Balancer"
+        LB[HAProxy / Nginx<br/>TLS Termination]
     end
 
-    subgraph "Authorization"
-        HB[Health Bypass]
-        RP[Route Protection]
+    subgraph "Application Tier"
+        D1[CCA Daemon 1<br/>:9200, :9100]
+        D2[CCA Daemon 2<br/>:9200, :9100]
+        DN[CCA Daemon N<br/>:9200, :9100]
     end
 
-    subgraph "Data Security"
-        IV[Input Validation]
-        SL[Size Limits]
-        NS[No Secrets in Logs]
+    subgraph "Data Tier"
+        PG[(PostgreSQL<br/>Primary + Replica)]
+        RD[(Redis<br/>Cluster / Sentinel)]
+        OL[Ollama<br/>Embedding Service]
     end
 
-    Request --> AM
-    AM -->|Check Header| AK
-    AK -->|Valid| RP
-    AK -->|/health| HB
-    RP --> IV
-    IV --> SL
-    SL --> Handler[Request Handler]
+    subgraph "Monitoring"
+        PROM[Prometheus]
+        GRAF[Grafana]
+    end
+
+    LB --> D1
+    LB --> D2
+    LB --> DN
+
+    D1 --> PG
+    D2 --> PG
+    DN --> PG
+
+    D1 --> RD
+    D2 --> RD
+    DN --> RD
+
+    D1 --> OL
+    D2 --> OL
+    DN --> OL
+
+    D1 -->|/metrics| PROM
+    D2 -->|/metrics| PROM
+    DN -->|/metrics| PROM
+    PROM --> GRAF
 ```
 
-## Module Dependencies
+### Port Assignments
+
+| Port | Service | Protocol |
+|------|---------|----------|
+| 9200 | CCA Daemon HTTP API | HTTP/REST |
+| 9100 | ACP WebSocket Server | WebSocket |
+| 5433 | PostgreSQL (Docker) | TCP |
+| 6380 | Redis (Docker) | TCP |
+| 11434 | Ollama | HTTP |
+
+### Container Deployment
+
+```yaml
+# docker-compose.prod.yml (simplified)
+services:
+  cca-daemon:
+    build: .
+    ports:
+      - "9200:9200"
+      - "9100:9100"
+    environment:
+      - CCA__REDIS__URL=redis://redis:6379
+      - CCA__POSTGRES__URL=postgres://cca:${POSTGRES_PASSWORD}@postgres:5432/cca
+      - CCA__DAEMON__REQUIRE_AUTH=true
+    depends_on:
+      - postgres
+      - redis
+      - ollama
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+```
+
+> **See Also:** [Deployment Guide](./deployment.md) for complete deployment instructions.
+
+---
+
+## Security Architecture
+
+### Permission Model
 
 ```mermaid
-graph BT
-    Core[cca-core]
-    ACP[cca-acp]
-    MCP[cca-mcp]
-    RL[cca-rl]
-    Daemon[cca-daemon]
-    CLI[cca-cli]
+graph TB
+    subgraph "Permission Modes"
+        AL[Allowlist Mode<br/>DEFAULT - Recommended]
+        SB[Sandbox Mode<br/>Read-only + External Sandbox]
+        DG[Dangerous Mode<br/>DEPRECATED - Never Use]
+    end
 
-    ACP --> Core
-    RL --> Core
-    MCP --> Core
-    Daemon --> Core
-    Daemon --> ACP
-    Daemon --> RL
-    CLI --> Core
+    subgraph "Allowlist Controls"
+        AT[--allowedTools<br/>Permitted operations]
+        DT[--disallowedTools<br/>Blocked operations]
+    end
+
+    AL --> AT
+    AL --> DT
 ```
 
-## Performance Considerations
+**Default Security Configuration:**
+
+```toml
+[agents.permissions]
+mode = "allowlist"
+allowed_tools = [
+    "Read", "Glob", "Grep",
+    "Write(src/**)", "Write(tests/**)",
+    "Bash(git *)", "Bash(cargo *)"
+]
+denied_tools = [
+    "Bash(rm -rf *)", "Bash(sudo *)",
+    "Read(.env*)", "Write(.env*)"
+]
+allow_network = false
+```
+
+### Authentication Flow
+
+```mermaid
+graph TB
+    subgraph "Request Flow"
+        REQ[Incoming Request]
+        AUTH[Auth Middleware]
+        HEALTH{Path = /health?}
+        KEY{Valid API Key?}
+        HANDLER[Route Handler]
+        REJECT[401 Unauthorized]
+    end
+
+    REQ --> AUTH
+    AUTH --> HEALTH
+    HEALTH -->|Yes| HANDLER
+    HEALTH -->|No| KEY
+    KEY -->|Yes| HANDLER
+    KEY -->|No| REJECT
+```
+
+**Security Layers:**
+
+| Layer | Protection |
+|-------|------------|
+| **API Keys** | Bearer token authentication |
+| **Input Validation** | Size limits, sanitization |
+| **Rate Limiting** | Governor-based throttling |
+| **Secret Protection** | No secrets in logs |
+| **Agent Permissions** | Granular tool control |
+
+> **See Also:** [Security Hardening Guide](./security-hardening.md) for comprehensive security documentation.
+
+---
+
+## Performance & Scalability
 
 ### Connection Pooling
 
-- **Redis**: Configured via `pool_size` (default: 10)
-- **PostgreSQL**: Configured via `max_connections` (default: 20)
+| Resource | Default | Max |
+|----------|---------|-----|
+| Redis Pool | 10 | Configurable |
+| PostgreSQL Pool | 20 | 50 |
+| Max Agents | 10 | Configurable |
 
 ### Timeouts
 
-| Component | Default Timeout |
-|-----------|----------------|
-| Agent task | 300 seconds |
-| ACP request | 30 seconds |
-| HTTP API | 120 seconds |
-| PTY response | 30 seconds |
+| Operation | Timeout |
+|-----------|---------|
+| Agent Task | 300s |
+| ACP Request | 30s |
+| HTTP API | 120s |
+| PTY Response | 30s |
+| DB Statement | 30s |
+| DB Query | 10s |
 
-### Scalability
+### Scalability Patterns
 
-- **Horizontal**: Multiple daemon instances with shared Redis/PostgreSQL
-- **Vertical**: Max agents configurable per daemon (default: 10)
-- **Token efficiency**: Target 30% reduction in context size
+| Pattern | Strategy |
+|---------|----------|
+| **Horizontal** | Multiple daemons, shared Redis/PostgreSQL |
+| **Vertical** | Increase max_agents, pool sizes |
+| **Vector Search** | IVFFlat indexing for O(log n) lookups |
+| **Token Efficiency** | 30%+ context reduction target |
+
+---
+
+## Architectural Patterns
+
+CCA employs several key architectural patterns:
+
+| Pattern | Application |
+|---------|-------------|
+| **Command Pattern** | Tasks encapsulate requests with metadata |
+| **Observer Pattern** | Redis Pub/Sub for event broadcasting |
+| **Strategy Pattern** | Multiple RL algorithms (Q-Learning, DQN, PPO) |
+| **Repository Pattern** | Database access layers (patterns, tasks, experiences) |
+| **Builder Pattern** | Configuration and client construction |
+| **Factory Pattern** | Agent and task creation |
+| **Async/Await** | Tokio-based concurrent operations |
+| **Circuit Breaker** | Connection retry with backoff |
+
+### Error Handling Strategy
+
+```mermaid
+flowchart TB
+    subgraph "Error Sources"
+        AE[Agent Error]
+        NE[Network Error]
+        TE[Timeout Error]
+        VE[Validation Error]
+    end
+
+    subgraph "Handling"
+        CT[Catch & Classify]
+        LG[Log with Context]
+        RT[Retry with Backoff]
+        FB[Fallback Action]
+    end
+
+    subgraph "Outcomes"
+        RC[Recovery Success]
+        ER[Error Response]
+    end
+
+    AE --> CT
+    NE --> CT
+    TE --> CT
+    VE --> CT
+
+    CT --> LG
+    CT --> RT
+    RT -->|Success| RC
+    RT -->|Max Retries| FB
+    FB --> ER
+```
+
+---
+
+## Summary
+
+CCA provides a robust, scalable architecture for multi-agent orchestration:
+
+- **Real Claude Code instances** managed via PTY
+- **Intelligent task routing** with RL-based optimization
+- **Semantic pattern memory** via PostgreSQL + pgvector
+- **Real-time communication** via WebSocket ACP
+- **Enterprise-grade storage** with Redis and PostgreSQL
+- **Security-first design** with granular permission controls
+- **Token efficiency** for cost optimization
+
+For detailed component documentation, see the [components/](./components/) directory.

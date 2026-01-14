@@ -1,0 +1,122 @@
+# CCA Alert Rules for Prometheus
+# These rules define conditions that should trigger alerts during testing
+
+groups:
+  - name: cca-daemon
+    rules:
+      # High error rate
+      - alert: CCAHighErrorRate
+        expr: sum(rate(cca_http_requests_total{status=~"5.."}[5m])) / sum(rate(cca_http_requests_total[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate in CCA daemon"
+          description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes"
+
+      # High response latency
+      - alert: CCAHighLatency
+        expr: histogram_quantile(0.95, sum(rate(cca_http_request_duration_seconds_bucket[5m])) by (le)) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High API latency in CCA daemon"
+          description: "95th percentile latency is {{ $value | humanizeDuration }}"
+
+      # No active agents
+      - alert: CCANoActiveAgents
+        expr: cca_active_agents == 0
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "No active agents in CCA"
+          description: "No agents are currently running"
+
+      # High task backlog
+      - alert: CCAHighTaskBacklog
+        expr: cca_tasks_in_progress > 50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High task backlog in CCA"
+          description: "{{ $value }} tasks are currently in progress"
+
+  - name: cca-infrastructure
+    rules:
+      # Redis disconnected
+      - alert: CCARedisDisconnected
+        expr: cca_redis_connected == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CCA Redis connection lost"
+          description: "Redis connection is down"
+
+      # PostgreSQL disconnected
+      - alert: CCAPostgresDisconnected
+        expr: cca_postgres_connected == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CCA PostgreSQL connection lost"
+          description: "PostgreSQL connection is down"
+
+      # High Redis operation latency
+      - alert: CCARedisHighLatency
+        expr: histogram_quantile(0.95, sum(rate(cca_redis_operation_duration_seconds_bucket[5m])) by (le)) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High Redis operation latency"
+          description: "95th percentile Redis latency is {{ $value | humanizeDuration }}"
+
+      # High PostgreSQL query latency
+      - alert: CCAPostgresHighLatency
+        expr: histogram_quantile(0.95, sum(rate(cca_postgres_query_duration_seconds_bucket[5m])) by (le)) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High PostgreSQL query latency"
+          description: "95th percentile PostgreSQL latency is {{ $value | humanizeDuration }}"
+
+  - name: cca-load-testing
+    rules:
+      # Load test threshold breach - HTTP
+      - alert: LoadTestHTTPThresholdBreach
+        expr: histogram_quantile(0.95, sum(rate(cca_http_request_duration_seconds_bucket[1m])) by (le)) > 2
+        for: 30s
+        labels:
+          severity: warning
+          test_type: load
+        annotations:
+          summary: "Load test HTTP latency threshold breached"
+          description: "95th percentile HTTP latency {{ $value | humanizeDuration }} exceeds 2s threshold"
+
+      # Load test threshold breach - Tasks
+      - alert: LoadTestTaskThresholdBreach
+        expr: histogram_quantile(0.95, sum(rate(cca_task_duration_seconds_bucket[1m])) by (le)) > 60
+        for: 30s
+        labels:
+          severity: warning
+          test_type: load
+        annotations:
+          summary: "Load test task duration threshold breached"
+          description: "95th percentile task duration {{ $value | humanizeDuration }} exceeds 60s threshold"
+
+      # WebSocket connection failures
+      - alert: LoadTestWebSocketFailures
+        expr: rate(cca_websocket_connections[1m]) < 0
+        for: 1m
+        labels:
+          severity: warning
+          test_type: load
+        annotations:
+          summary: "WebSocket connections declining during load test"
+          description: "WebSocket connections are being lost"

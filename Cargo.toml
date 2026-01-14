@@ -8,6 +8,7 @@ members = [
     "crates/cca-mcp",
     "crates/cca-acp",
     "crates/cca-rl",
+    "tests/chaos",
 ]
 
 [workspace.package]
@@ -83,6 +84,9 @@ async-trait = "0.1"
 
 # Constant-time comparison for security
 subtle = "2.6"
+
+# Futures utilities
+futures = "0.3"
 
 # Rate limiting
 governor = "0.6"

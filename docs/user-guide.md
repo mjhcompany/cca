@@ -15,21 +15,34 @@ Version: 0.3.0 | Rust 1.75+ Required | License: MIT
 5. [MCP Tools for Claude Code](#mcp-tools-for-claude-code)
 6. [Configuration](#configuration)
 7. [Agent Roles](#agent-roles)
-8. [Security](#security)
-9. [Troubleshooting](#troubleshooting)
+8. [Semantic Search & Embeddings](#semantic-search--embeddings)
+9. [Code Indexing](#code-indexing)
+10. [Reinforcement Learning](#reinforcement-learning)
+11. [Token Efficiency](#token-efficiency)
+12. [Security](#security)
+13. [HTTP API Reference](#http-api-reference)
+14. [Troubleshooting](#troubleshooting)
+15. [Advanced Usage](#advanced-usage)
+16. [Resources](#resources)
 
 ---
 
 ## Overview
 
-CCA is a next-generation multi-agent orchestration system that enables coordination of multiple independent Claude Code instances through a Command Center architecture. Key features include:
+CCA is a next-generation multi-agent orchestration system that enables coordination of multiple independent Claude Code instances through a Command Center architecture. Unlike simulated agents, CCA spawns **real Claude Code processes** that collaborate on complex tasks.
 
-- **Multi-Agent Orchestration** - Spawn and coordinate specialized Claude Code workers
-- **Reinforcement Learning** - Intelligent task routing that learns from experience
-- **ReasoningBank** - Pattern storage and retrieval for learned solutions
-- **Real-time Communication** - WebSocket-based agent-to-agent messaging (ACP)
-- **Token Efficiency** - Context compression and usage optimization
-- **MCP Integration** - Standard Claude Code plugin interface
+### Key Features
+
+| Feature | Description |
+|---------|-------------|
+| **Multi-Agent Orchestration** | Spawn and coordinate specialized Claude Code workers |
+| **Reinforcement Learning** | Intelligent task routing that learns from experience |
+| **ReasoningBank** | Pattern storage and retrieval with semantic search |
+| **Semantic Search** | Vector similarity search using pgvector and embeddings |
+| **Code Indexing** | Index and search codebases semantically |
+| **Real-time Communication** | WebSocket-based agent-to-agent messaging (ACP) |
+| **Token Efficiency** | Context compression and usage optimization |
+| **MCP Integration** | Standard Claude Code plugin interface |
 
 ### Architecture
 
@@ -52,6 +65,14 @@ CCA is a next-generation multi-agent orchestration system that enables coordinat
 └────────────┘    └────────────┘    └────────────┘
 ```
 
+### How It Works
+
+1. **Command Center**: Your primary Claude Code instance with the CCA MCP plugin
+2. **CCA Daemon**: Orchestrates agents, routes tasks, manages state
+3. **Worker Agents**: Specialized Claude Code instances for specific tasks
+4. **ReasoningBank**: Stores patterns and solutions for reuse
+5. **RL Engine**: Learns optimal task routing from experience
+
 ---
 
 ## Installation
@@ -71,6 +92,9 @@ docker-compose --version
 
 # Claude Code CLI
 claude --version
+
+# Ollama (optional, for semantic search)
+ollama --version
 ```
 
 ### Build from Source
@@ -88,7 +112,9 @@ cd cca
 docker-compose up -d
 ```
 
-This starts PostgreSQL (with pgvector) and Redis.
+This starts:
+- PostgreSQL 16 with pgvector extension (port 5433)
+- Redis 7 (port 6380)
 
 3. **Build the project:**
 
@@ -104,6 +130,7 @@ cargo build --release
 
 ```bash
 ./target/release/cca --help
+./target/release/ccad --help
 ```
 
 ### Binary Installation
@@ -115,7 +142,7 @@ If pre-built binaries are available:
 curl -L https://github.com/your-org/cca/releases/latest/download/cca-linux-x86_64.tar.gz | tar xz
 
 # Move to your PATH
-sudo mv cca cca-mcp /usr/local/bin/
+sudo mv cca ccad cca-mcp /usr/local/bin/
 
 # Verify
 cca --version
@@ -129,7 +156,17 @@ cca --version
 cca config init
 ```
 
-2. **Configure Claude Code MCP integration** (see [MCP Tools](#mcp-tools-for-claude-code))
+2. **Start Ollama for semantic search (optional but recommended):**
+
+```bash
+# Pull the embedding model
+ollama pull nomic-embed-text
+
+# Verify Ollama is running
+curl http://localhost:11434/api/tags
+```
+
+3. **Configure Claude Code MCP integration** (see [MCP Tools](#mcp-tools-for-claude-code))
 
 ---
 
@@ -140,9 +177,22 @@ cca config init
 ```bash
 cd /path/to/cca
 docker-compose up -d
+
+# Verify services are running
+docker-compose ps
 ```
 
-### 2. Start the Daemon
+### 2. Start Ollama (Optional - for Semantic Search)
+
+```bash
+# Start Ollama if not running
+ollama serve &
+
+# Pull embedding model
+ollama pull nomic-embed-text
+```
+
+### 3. Start the Daemon
 
 ```bash
 # Start in background
@@ -150,15 +200,21 @@ cca daemon start
 
 # Or start in foreground for debugging
 cca daemon start --foreground
+
+# Or run directly
+./target/release/ccad
 ```
 
-### 3. Verify Daemon Status
+### 4. Verify Daemon Status
 
 ```bash
 cca daemon status
+
+# Or use curl
+curl http://localhost:9200/health
 ```
 
-### 4. Start Worker Agents
+### 5. Start Worker Agents
 
 Open separate terminal windows for each worker:
 
@@ -173,19 +229,19 @@ cca agent worker backend
 cca agent worker frontend
 ```
 
-### 5. Check Connected Agents
+### 6. Check Connected Agents
 
 ```bash
 cca agent list
 ```
 
-### 6. Create Your First Task
+### 7. Create Your First Task
 
 ```bash
 cca task create "Analyze the codebase structure and suggest improvements"
 ```
 
-### 7. Monitor Progress
+### 8. Monitor Progress
 
 ```bash
 cca task list
@@ -228,8 +284,10 @@ cca daemon logs -f
 |---------|-------------|
 | `cca agent list` | List all connected worker agents |
 | `cca agent worker <role>` | Run as a persistent agent worker |
+| `cca agent spawn <role>` | Spawn a new agent (daemon-managed) |
 | `cca agent stop <id>` | Disconnect a worker by ID or role |
 | `cca agent send <id> "message"` | Send a message to a specific agent |
+| `cca agent attach <id>` | Attach to agent PTY for debugging |
 | `cca agent diag` | Run comprehensive system diagnostics |
 
 **Available Roles:** `coordinator`, `frontend`, `backend`, `dba`, `devops`, `security`, `qa`
@@ -248,6 +306,9 @@ cca agent diag
 
 # Stop a specific agent
 cca agent stop backend
+
+# Send a message to an agent
+cca agent send <agent-id> "Please review the authentication module"
 ```
 
 ### Task Management
@@ -256,10 +317,14 @@ cca agent stop backend
 |---------|-------------|
 | `cca task create "description"` | Create a new task |
 | `cca task create "desc" -a <role>` | Create task for specific agent |
+| `cca task create "desc" --priority high` | Create task with priority |
 | `cca task list` | List recent tasks (default: 10) |
 | `cca task list --limit <n>` | List last N tasks |
+| `cca task list --status pending` | Filter by status |
 | `cca task status <id>` | Check task status |
 | `cca task cancel <id>` | Cancel a pending task |
+
+**Task Priorities:** `low`, `normal` (default), `high`, `critical`
 
 **Examples:**
 
@@ -267,8 +332,8 @@ cca agent stop backend
 # Create a general task
 cca task create "Implement user authentication API"
 
-# Create a task for the frontend agent
-cca task create "Build a login form component" -a frontend
+# Create a high-priority task for the frontend agent
+cca task create "Build a login form component" -a frontend --priority high
 
 # Check task status
 cca task status abc123
@@ -281,7 +346,7 @@ cca task list --limit 20
 
 | Command | Description |
 |---------|-------------|
-| `cca memory search "query"` | Search the ReasoningBank |
+| `cca memory search "query"` | Search the ReasoningBank (uses semantic search if available) |
 | `cca memory search "query" -l <n>` | Search with custom limit |
 | `cca memory store "pattern"` | Store a new pattern |
 | `cca memory store "pattern" -t <type>` | Store with pattern type |
@@ -292,7 +357,7 @@ cca task list --limit 20
 **Examples:**
 
 ```bash
-# Search for authentication patterns
+# Search for authentication patterns (semantic search)
 cca memory search "authentication"
 
 # Store a useful pattern
@@ -300,6 +365,9 @@ cca memory store "Use JWT tokens with refresh rotation for secure auth"
 
 # Export all patterns for backup
 cca memory export backup-patterns.json
+
+# View memory statistics
+cca memory stats
 ```
 
 ### Configuration
@@ -309,6 +377,7 @@ cca memory export backup-patterns.json
 | `cca config show` | Display current configuration |
 | `cca config init` | Create default cca.toml |
 | `cca config init --force` | Overwrite existing config |
+| `cca config init --path <path>` | Create config at specific path |
 | `cca config set <key> <value>` | Set individual config values |
 
 **Examples:**
@@ -322,6 +391,7 @@ cca config init
 
 # Update a setting
 cca config set daemon.max_agents 20
+cca config set redis.url "redis://localhost:6380"
 ```
 
 ### Status
@@ -331,12 +401,40 @@ cca config set daemon.max_agents 20
 cca status
 ```
 
+**Output:**
+```
+CCA Status
+==========
+Daemon: running
+  Version: 0.3.0
+  Address: 127.0.0.1:9200
+  Uptime: 2h 15m
+
+Agents: 3 running
+  coordinator: Ready
+  backend: Busy (task: abc123)
+  frontend: Ready
+
+Redis: connected
+  Pool size: 10
+  Agents tracked: 3
+
+PostgreSQL: connected
+  Pool size: 20
+  Patterns: 150
+
+Tasks:
+  Pending: 2
+  Completed: 45
+  Failed: 3
+```
+
 ### Global Options
 
 ```bash
 # Enable verbose/debug logging for any command
 cca --verbose daemon status
-cca --verbose agent list
+cca -v agent list
 ```
 
 ---
@@ -375,6 +473,7 @@ Add CCA to your Claude Code MCP configuration:
 | `cca_status` | Check system or task status | `task_id` (optional) |
 | `cca_activity` | Get current activity of all agents | none |
 | `cca_agents` | List all running agents | none |
+| `cca_workloads` | Get workload distribution | none |
 
 **Usage in Claude Code:**
 
@@ -407,7 +506,6 @@ Use cca_rl_algorithm to set algorithm to "ppo"
 |------|-------------|------------|
 | `cca_acp_status` | Get WebSocket server status | none |
 | `cca_broadcast` | Send message to all agents | `message` (required) |
-| `cca_workloads` | Get workload distribution | none |
 
 #### Token Efficiency
 
@@ -423,6 +521,20 @@ Use cca_rl_algorithm to set algorithm to "ppo"
 - `history` - Compress git history
 - `summarize` - Abstract verbose sections
 - `deduplicate` - Remove exact duplicates
+
+#### Code Indexing
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `cca_index_codebase` | Index a codebase for semantic search | `path` (required), `extensions` (optional), `exclude_patterns` (optional) |
+| `cca_search_code` | Search indexed code semantically | `query` (required), `language` (optional), `limit` (default: 10) |
+
+**Usage in Claude Code:**
+
+```
+Use cca_index_codebase to index: "/path/to/project"
+Use cca_search_code to find: "authentication middleware"
+```
 
 ---
 
@@ -447,6 +559,7 @@ bind_address = "127.0.0.1:9200"    # HTTP API bind address
 log_level = "info"                  # debug, info, warn, error
 max_agents = 10                     # Maximum concurrent agents
 require_auth = false                # Enable API key authentication
+# api_keys = ["key1", "key2"]       # API keys (prefer env vars)
 
 [redis]
 url = "redis://localhost:6380"      # Redis connection URL (empty = disabled)
@@ -496,6 +609,7 @@ All settings can be overridden via environment variables with `CCA__` prefix:
 export CCA__DAEMON__BIND_ADDRESS="0.0.0.0:9200"
 export CCA__DAEMON__MAX_AGENTS="20"
 export CCA__DAEMON__REQUIRE_AUTH="true"
+export CCA__DAEMON__API_KEYS="key1,key2,key3"
 
 # Database connections
 export CCA__REDIS__URL="redis://redis-host:6379"
@@ -509,6 +623,12 @@ export CCA__AGENTS__TOKEN_BUDGET_PER_TASK="100000"
 export CCA__AGENTS__PERMISSIONS__MODE="allowlist"
 export CCA__AGENTS__PERMISSIONS__ALLOWED_TOOLS="Read,Glob,Grep,Write(src/**)"
 ```
+
+### Configuration Precedence
+
+1. **Environment variables** (highest priority)
+2. **Config file**
+3. **Default values** (lowest priority)
 
 ---
 
@@ -539,6 +659,311 @@ cca agent worker security
 cca agent worker qa
 ```
 
+### Role-Specific Permission Overrides
+
+```toml
+[agents.permissions.role_overrides.coordinator]
+mode = "sandbox"
+allowed_tools = ["Read", "Glob", "Grep"]
+
+[agents.permissions.role_overrides.backend]
+mode = "allowlist"
+allowed_tools = ["Read", "Glob", "Grep", "Write(src/**)", "Bash(cargo *)"]
+denied_tools = ["Bash(cargo publish)"]
+
+[agents.permissions.role_overrides.dba]
+mode = "allowlist"
+allowed_tools = ["Read", "Glob", "Grep", "Bash(psql *)"]
+denied_tools = ["Bash(psql * DROP *)"]
+```
+
+---
+
+## Semantic Search & Embeddings
+
+CCA supports semantic search for the ReasoningBank, enabling intelligent pattern retrieval based on meaning rather than exact text matching.
+
+### Prerequisites
+
+1. **PostgreSQL with pgvector extension** (included in docker-compose.yml)
+2. **Ollama with nomic-embed-text model**
+
+### Setup
+
+```bash
+# Start Ollama
+ollama serve &
+
+# Pull the embedding model
+ollama pull nomic-embed-text
+
+# Verify the model is available
+ollama list
+```
+
+### How Semantic Search Works
+
+1. **Query Processing**: When you search, your query is converted to a 768-dimensional vector using the `nomic-embed-text` model
+2. **Vector Similarity**: pgvector performs cosine similarity search against pattern embeddings
+3. **Filtering**: Results are filtered with a minimum similarity threshold of 30%
+4. **Ranking**: Results are ordered by similarity score (highest first)
+
+### Search Types
+
+| Search Type | When Used | Description |
+|-------------|-----------|-------------|
+| **Semantic** | Ollama available | Vector similarity search, finds conceptually related patterns |
+| **Text** | Fallback | Case-insensitive substring matching (PostgreSQL ILIKE) |
+
+### Usage
+
+**CLI:**
+```bash
+# Semantic search for patterns
+cca memory search "how to implement authentication"
+
+# The response includes search_type
+{
+  "patterns": [...],
+  "search_type": "semantic"  # or "text" if fallback
+}
+```
+
+**MCP Tool:**
+```
+Use cca_memory to search for: "database connection pooling best practices"
+```
+
+### Backfilling Embeddings
+
+If you have existing patterns without embeddings:
+
+```bash
+# Via API - processes 10 patterns at a time
+curl -X POST http://localhost:9200/api/v1/memory/backfill-embeddings
+
+# Repeat until remaining is 0
+{
+  "success": true,
+  "processed": 10,
+  "errors": 0,
+  "remaining": 45
+}
+```
+
+### Embedding Configuration
+
+| Component | Requirement |
+|-----------|-------------|
+| PostgreSQL | pgvector extension enabled |
+| Embedding Model | Ollama with `nomic-embed-text:latest` |
+| Vector Dimensions | 768 |
+| Ollama URL | Default: `http://localhost:11434` |
+
+---
+
+## Code Indexing
+
+CCA can index your codebase for semantic code search, enabling natural language queries to find relevant functions, classes, and methods.
+
+### Indexing a Codebase
+
+**MCP Tool:**
+```
+Use cca_index_codebase with path: "/path/to/your/project"
+```
+
+**Parameters:**
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `path` | Directory to index | Required |
+| `extensions` | File extensions to include | Common code files |
+| `exclude_patterns` | Glob patterns to exclude | `**/node_modules/**`, etc. |
+
+**Example:**
+```json
+{
+  "path": "/home/user/project",
+  "extensions": [".rs", ".py", ".ts"],
+  "exclude_patterns": ["**/target/**", "**/node_modules/**", "**/.git/**"]
+}
+```
+
+### Searching Indexed Code
+
+**MCP Tool:**
+```
+Use cca_search_code to find: "error handling middleware"
+```
+
+**Parameters:**
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `query` | Natural language search query | Required |
+| `language` | Filter by programming language | All languages |
+| `limit` | Maximum results | 10 |
+
+**Example Results:**
+```json
+{
+  "results": [
+    {
+      "file": "src/middleware/error.rs",
+      "function": "handle_error",
+      "language": "rust",
+      "similarity": 0.89,
+      "snippet": "pub async fn handle_error(...)"
+    }
+  ]
+}
+```
+
+---
+
+## Reinforcement Learning
+
+CCA uses reinforcement learning to optimize task routing and agent selection over time.
+
+### Available Algorithms
+
+| Algorithm | Best For | Pros | Cons |
+|-----------|----------|------|------|
+| **Q-Learning** | Simple state spaces | Fast, interpretable | Limited scalability |
+| **DQN** | Complex state spaces | Handles high dimensions | Requires tuning |
+| **PPO** | Continuous actions | Stable training | Higher complexity |
+
+### RL Engine Status
+
+```bash
+# Via CLI
+cca status
+
+# Via API
+curl http://localhost:9200/api/v1/rl/stats
+```
+
+**Response:**
+```json
+{
+  "algorithm": "q_learning",
+  "total_steps": 1000,
+  "total_rewards": 850.5,
+  "average_reward": 0.85,
+  "buffer_size": 500,
+  "experience_count": 1000,
+  "algorithms_available": ["q_learning", "ppo", "dqn"]
+}
+```
+
+### Triggering Training
+
+```bash
+# Via API
+curl -X POST http://localhost:9200/api/v1/rl/train
+```
+
+### Changing Algorithms
+
+```bash
+# Via API
+curl -X POST http://localhost:9200/api/v1/rl/algorithm \
+  -H "Content-Type: application/json" \
+  -d '{"algorithm": "dqn"}'
+```
+
+### Reward Computation
+
+The system computes rewards based on:
+
+| Component | Contribution | Range |
+|-----------|--------------|-------|
+| Task Success/Failure | Base reward | +1.0 / -0.5 |
+| Token Efficiency | Bonus | 0.0 - 0.2 |
+| Speed | Bonus | 0.0 - 0.1 |
+| **Total** | | -0.5 to +1.3 |
+
+### Configuration
+
+```toml
+[learning]
+enabled = true
+default_algorithm = "q_learning"
+training_batch_size = 32
+update_interval_seconds = 300
+```
+
+---
+
+## Token Efficiency
+
+CCA provides tools for analyzing and optimizing token usage across agents.
+
+### Analyzing Token Usage
+
+```bash
+# Via API
+curl -X POST http://localhost:9200/api/v1/tokens/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Your content here..."}'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "total_tokens": 1500,
+  "repeated_tokens": 200,
+  "code_blocks": 3,
+  "long_lines": 5,
+  "compression_potential": "25.5%",
+  "repeated_lines": 10
+}
+```
+
+### Compressing Content
+
+```bash
+# Via API
+curl -X POST http://localhost:9200/api/v1/tokens/compress \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "Your content here...",
+    "target_reduction": 0.3,
+    "strategies": ["code_comments", "deduplicate"]
+  }'
+```
+
+### Compression Strategies
+
+| Strategy | Description |
+|----------|-------------|
+| `code_comments` | Remove redundant comments from code |
+| `history` | Compress git history output |
+| `summarize` | Abstract verbose sections |
+| `deduplicate` | Remove exact duplicate content |
+
+### Getting Recommendations
+
+```bash
+curl http://localhost:9200/api/v1/tokens/recommendations
+```
+
+**Response:**
+```json
+{
+  "recommendations": [
+    {
+      "agent_id": "agent-001",
+      "category": "high_context",
+      "severity": "warning",
+      "message": "Agent has high context size, consider compression",
+      "potential_savings": 5000
+    }
+  ],
+  "total_potential_savings": 5000
+}
+```
+
 ---
 
 ## Security
@@ -546,6 +971,12 @@ cca agent worker qa
 ### Permission Modes
 
 CCA supports three permission modes for agent security:
+
+| Mode | Security Level | Description |
+|------|---------------|-------------|
+| **allowlist** | High | Granular control via `--allowedTools` and `--disallowedTools` |
+| **sandbox** | Medium | Minimal read-only permissions |
+| **dangerous** | None | **NOT RECOMMENDED** - Disables all permission checks |
 
 #### Allowlist Mode (Recommended)
 
@@ -561,6 +992,7 @@ denied_tools = [
     "Bash(rm -rf *)", "Bash(sudo *)",
     "Read(.env*)", "Write(.env*)"
 ]
+allow_network = false
 ```
 
 #### Sandbox Mode
@@ -583,6 +1015,12 @@ mode = "dangerous"
 # Uses --dangerously-skip-permissions
 ```
 
+**Warning:** This mode:
+- Disables ALL permission checks
+- Allows arbitrary command execution
+- Bypasses all safety prompts
+- Creates severe security risks
+
 ### Tool Pattern Syntax
 
 ```
@@ -590,6 +1028,118 @@ Simple:       "Read", "Glob", "Grep"
 Patterns:     "Write(src/**)", "Bash(git *)"
 Exclusions:   "Bash(rm -rf *)", "Read(.env*)"
 ```
+
+### Network Restrictions
+
+When `allow_network = false` (default), these commands are automatically blocked:
+- `curl`, `wget`, `nc`, `netcat`
+
+### API Authentication
+
+Enable authentication in production:
+
+```toml
+[daemon]
+require_auth = true
+# Set API keys via environment variable
+```
+
+```bash
+export CCA__DAEMON__API_KEYS="strong-random-key-1,strong-random-key-2"
+```
+
+---
+
+## HTTP API Reference
+
+CCA exposes a REST API for programmatic access.
+
+### Health & Status
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check (no auth required) |
+| `/api/v1/status` | GET | System status |
+
+### Agent Management
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/agents` | GET | List agents |
+| `/api/v1/agents` | POST | Spawn agent |
+| `/api/v1/activity` | GET | Agent activity |
+| `/api/v1/workloads` | GET | Workload distribution |
+
+### Task Management
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/tasks` | POST | Create task |
+| `/api/v1/tasks` | GET | List tasks |
+| `/api/v1/tasks/<id>` | GET | Get task details |
+| `/api/v1/tasks/<id>/cancel` | POST | Cancel task |
+
+### Memory (ReasoningBank)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/memory/search` | POST | Search patterns (semantic) |
+| `/api/v1/memory/store` | POST | Store pattern |
+| `/api/v1/memory/stats` | GET | Memory statistics |
+| `/api/v1/memory/backfill-embeddings` | POST | Generate missing embeddings |
+
+### Reinforcement Learning
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/rl/stats` | GET | RL engine status |
+| `/api/v1/rl/train` | POST | Trigger training |
+| `/api/v1/rl/algorithm` | POST | Set algorithm |
+| `/api/v1/rl/params` | GET/POST | Get/set parameters |
+
+### Token Efficiency
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/tokens/analyze` | POST | Analyze content |
+| `/api/v1/tokens/compress` | POST | Compress content |
+| `/api/v1/tokens/metrics` | GET | Get metrics |
+| `/api/v1/tokens/recommendations` | GET | Get recommendations |
+
+### Communication
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/acp/status` | GET | ACP WebSocket status |
+| `/api/v1/broadcast` | POST | Broadcast to all agents |
+
+### Infrastructure
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/redis/status` | GET | Redis status |
+| `/api/v1/postgres/status` | GET | PostgreSQL status |
+
+### Authentication
+
+When `require_auth = true`, include API key in requests:
+
+```bash
+# Header option 1
+curl -H "X-API-Key: your-api-key" http://localhost:9200/api/v1/status
+
+# Header option 2
+curl -H "Authorization: Bearer your-api-key" http://localhost:9200/api/v1/status
+```
+
+### Input Limits
+
+| Field | Max Size |
+|-------|----------|
+| Task description | 100 KB |
+| Broadcast message | 10 KB |
+| Token content | 1 MB |
+| Memory query | 1 KB |
 
 ---
 
@@ -618,12 +1168,16 @@ This checks:
 ```bash
 # Check if port is already in use
 lsof -i :9200
+lsof -i :9100
 
 # Verify infrastructure is running
 docker-compose ps
 
 # Check logs for errors
 cca daemon logs -n 50
+
+# Try foreground mode for debugging
+cca daemon start --foreground
 ```
 
 #### Workers Can't Connect
@@ -637,6 +1191,9 @@ lsof -i :9100
 
 # Check daemon logs
 cca daemon logs -f
+
+# Verify network connectivity
+curl http://localhost:9200/health
 ```
 
 #### Tasks Not Completing
@@ -651,6 +1208,9 @@ cca task list
 
 # Check specific task
 cca task status <task-id>
+
+# Check worker logs
+cca daemon logs -f
 ```
 
 #### Database Connection Issues
@@ -660,15 +1220,63 @@ cca task status <task-id>
 docker-compose ps postgres
 docker-compose logs postgres
 
+# Test PostgreSQL connection
+psql -h localhost -p 5433 -U cca -d cca -c "SELECT 1"
+
 # Check Redis
 docker-compose ps redis
 docker-compose logs redis
+
+# Test Redis connection
+redis-cli -p 6380 ping
+```
+
+#### Semantic Search Not Working
+
+```bash
+# Check if Ollama is running
+curl http://localhost:11434/api/tags
+
+# Verify model is available
+ollama list | grep nomic-embed-text
+
+# Check search type in response
+cca memory search "test"
+# Look for "search_type": "semantic" vs "text"
+
+# Backfill embeddings if needed
+curl -X POST http://localhost:9200/api/v1/memory/backfill-embeddings
+```
+
+#### Permission Denied Errors
+
+```bash
+# Check current permission mode
+cca config show | grep -A 10 permissions
+
+# Verify allowed tools include needed operations
+# Update config if necessary
+
+# For debugging, check daemon logs
+cca daemon logs -f | grep -i permission
 ```
 
 ### Log Locations
 
-- **Daemon logs:** `~/.local/share/cca/ccad.log`
-- **PID file:** `~/.local/run/cca/ccad.pid`
+| Log | Location |
+|-----|----------|
+| Daemon logs | `~/.local/share/cca/ccad.log` |
+| PID file | `~/.local/run/cca/ccad.pid` |
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | General error |
+| 2 | Configuration error |
+| 3 | Connection error |
+| 4 | Not found |
 
 ### Getting Help
 
@@ -681,41 +1289,184 @@ cca <command> --help
 cca daemon --help
 cca agent --help
 cca task --help
+cca memory --help
+cca config --help
 ```
 
 ---
 
-## HTTP API Reference
+## Advanced Usage
 
-CCA exposes a REST API for programmatic access:
+### Running Multiple Workers
 
-### Endpoints
+For complex projects, run multiple specialized workers:
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check (no auth) |
-| `/api/v1/status` | GET | System status |
-| `/api/v1/agents` | GET | List agents |
-| `/api/v1/activity` | GET | Agent activity |
-| `/api/v1/workloads` | GET | Workload distribution |
-| `/api/v1/tasks` | POST | Create task |
-| `/api/v1/tasks` | GET | List tasks |
-| `/api/v1/tasks/<id>` | GET | Get task details |
-| `/api/v1/tasks/<id>/cancel` | POST | Cancel task |
-| `/api/v1/memory/search` | GET | Search patterns |
-| `/api/v1/memory/store` | POST | Store pattern |
-| `/api/v1/memory/stats` | GET | Memory statistics |
-| `/api/v1/rl/stats` | GET | RL engine status |
-| `/api/v1/rl/train` | POST | Trigger training |
-| `/api/v1/acp/status` | GET | ACP server status |
+```bash
+# Terminal 1 - Start coordinator
+cca agent worker coordinator
+
+# Terminal 2-4 - Start specialists
+cca agent worker backend
+cca agent worker frontend
+cca agent worker dba
+
+# Terminal 5-6 - Start reviewers
+cca agent worker security
+cca agent worker qa
+```
+
+### Task Delegation Patterns
+
+**Direct Assignment:**
+```bash
+cca task create "Implement user model" -a backend
+```
+
+**Coordinator Routing:**
+```bash
+# Let the coordinator decide which agent should handle it
+cca task create "Add user authentication with OAuth2"
+```
+
+**Priority Tasks:**
+```bash
+cca task create "Fix critical security vulnerability" --priority critical
+```
+
+### Integration with CI/CD
+
+```bash
+#!/bin/bash
+# Example CI/CD script
+
+# Start daemon if not running
+cca daemon status || cca daemon start
+
+# Run code review
+cca task create "Review PR changes for security issues" -a security --priority high
+
+# Wait for completion
+sleep 30
+cca task list --status completed --limit 1
+```
+
+### Using the HTTP API Programmatically
+
+**Python Example:**
+```python
+import requests
+
+CCA_URL = "http://localhost:9200"
+API_KEY = "your-api-key"
+
+headers = {"X-API-Key": API_KEY}
+
+# Create a task
+response = requests.post(
+    f"{CCA_URL}/api/v1/tasks",
+    json={"description": "Implement feature X", "priority": "high"},
+    headers=headers
+)
+task = response.json()
+
+# Check status
+response = requests.get(
+    f"{CCA_URL}/api/v1/tasks/{task['task_id']}",
+    headers=headers
+)
+print(response.json())
+```
+
+### Custom Agent Configurations
+
+Create custom CLAUDE.md files for specialized agents:
+
+```bash
+# agents/custom-agent/CLAUDE.md
+# Custom Agent Configuration
+
+## Role
+You are a specialized agent for handling data migrations.
+
+## Capabilities
+- Database schema analysis
+- Migration script generation
+- Data validation
+
+## Constraints
+- Always backup before migration
+- Validate data integrity after changes
+```
+
+### Performance Tuning
+
+**For High Throughput:**
+```toml
+[daemon]
+max_agents = 20
+
+[redis]
+pool_size = 20
+
+[postgres]
+pool_size = 20
+max_connections = 50
+
+[agents]
+default_timeout_seconds = 600
+token_budget_per_task = 100000
+```
+
+**For Low Latency:**
+```toml
+[learning]
+training_batch_size = 16
+update_interval_seconds = 60
+
+[acp]
+reconnect_interval_ms = 500
+max_reconnect_attempts = 10
+```
 
 ---
 
 ## Resources
 
-- **Source Code:** Check the `crates/` directory for implementation details
-- **Agent Configs:** Role-specific configurations in `agents/` directory
-- **Database Migrations:** Schema files in `migrations/` directory
+### Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Architecture](./architecture.md) | System architecture with diagrams |
+| [API Reference](./api-reference.md) | Complete HTTP API documentation |
+| [Configuration](./configuration.md) | All configuration options |
+| [Deployment](./deployment.md) | Production deployment guide |
+| [Security Hardening](./security-hardening.md) | Security best practices |
+| [Data Flow](./data-flow.md) | Data flow diagrams |
+
+### Component Documentation
+
+| Component | Description |
+|-----------|-------------|
+| [cca-core](./components/cca-core.md) | Core types and traits |
+| [cca-daemon](./components/cca-daemon.md) | Main orchestration service |
+| [cca-mcp](./components/cca-mcp.md) | MCP server plugin |
+| [cca-acp](./components/cca-acp.md) | Agent Communication Protocol |
+| [cca-rl](./components/cca-rl.md) | Reinforcement Learning engine |
+| [cca-cli](./components/cca-cli.md) | Command-line interface |
+
+### Project Structure
+
+| Path | Description |
+|------|-------------|
+| `crates/cca-core/` | Core types and traits |
+| `crates/cca-daemon/` | Main daemon (ccad) |
+| `crates/cca-cli/` | CLI tool (cca) |
+| `crates/cca-mcp/` | MCP server plugin |
+| `crates/cca-acp/` | Agent Communication Protocol |
+| `crates/cca-rl/` | Reinforcement Learning |
+| `agents/` | Agent CLAUDE.md files |
+| `migrations/` | Database migrations |
+| `docs/` | Documentation |
 
 ---
 

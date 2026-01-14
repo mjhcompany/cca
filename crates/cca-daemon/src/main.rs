@@ -37,6 +37,7 @@ mod config;
 mod daemon;
 mod embeddings;
 mod indexing;
+mod metrics;
 mod orchestrator;
 mod postgres;
 mod redis;
