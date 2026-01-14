@@ -103,7 +103,14 @@ The daemon starts on `http://127.0.0.1:9200` with ACP WebSocket on port `9100`.
 
 ### Claude Code Integration
 
-Add CCA to your Claude Code MCP configuration:
+Register CCA with Claude Code using the CLI:
+
+```bash
+# Register CCA MCP server (required)
+claude mcp add cca /path/to/cca/target/release/cca-mcp --args "--daemon-url" "http://127.0.0.1:9200"
+```
+
+Or manually add to your Claude Code MCP configuration (`~/.claude/settings.json`):
 
 ```json
 {
