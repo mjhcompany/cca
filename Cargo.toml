@@ -107,10 +107,40 @@ version = "3.14"
 [workspace.dependencies.wiremock]
 version = "0.6"
 
+# Benchmarking framework
+[workspace.dependencies.criterion]
+version = "0.5"
+features = ["html_reports", "async_tokio"]
+
+# CPU profiling with flamegraph support
+[workspace.dependencies.pprof]
+version = "0.14"
+features = ["flamegraph", "criterion"]
+
+# Heap profiling
+[workspace.dependencies.dhat]
+version = "0.3"
+
+# Production release profile
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
+
+# Profiling profile - release-like optimizations but with debug symbols
+# Use: cargo build --profile profiling
+# Then: perf record -g ./target/profiling/ccad
+# Or:   flamegraph -- ./target/profiling/ccad
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
+# Benchmark profile - optimized for accurate benchmarks
+[profile.bench]
+lto = true
+codegen-units = 1
+debug = false
 
 # Add workspace package for integration tests
 [workspace.metadata.integration-tests]

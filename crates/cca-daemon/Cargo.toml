@@ -67,3 +67,47 @@ glob = "0.3"
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3.14"
 axum-test = "16"
+criterion.workspace = true
+pprof.workspace = true
+dhat.workspace = true
+rand = "0.8"
+
+# Token efficiency benchmarks
+[[bench]]
+name = "token_benchmarks"
+harness = false
+
+# Compression algorithm benchmarks
+[[bench]]
+name = "compression_benchmarks"
+harness = false
+
+# RL engine benchmarks
+[[bench]]
+name = "rl_benchmarks"
+harness = false
+
+# Inter-agent communication benchmarks
+[[bench]]
+name = "communication_benchmarks"
+harness = false
+
+# Code parsing/indexing benchmarks
+[[bench]]
+name = "code_indexing"
+harness = false
+
+# PostgreSQL query benchmarks
+[[bench]]
+name = "postgres_queries"
+harness = false
+
+# Orchestrator routing benchmarks
+[[bench]]
+name = "orchestrator"
+harness = false
+
+# Full profiling benchmark with flamegraph output
+[[bench]]
+name = "flamegraph_profile"
+harness = false
