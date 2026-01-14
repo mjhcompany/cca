@@ -20,7 +20,6 @@ chrono.workspace = true
 
 # RL specific
 rand = "0.8"
-ndarray = "0.16"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

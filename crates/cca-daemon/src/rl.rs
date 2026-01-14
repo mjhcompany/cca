@@ -114,10 +114,14 @@ impl RLService {
 
     /// Record an experience and optionally persist to PostgreSQL
     pub async fn record_experience(&self, experience: Experience) -> Result<()> {
-        // Record in engine's buffer
+        // Record in engine's buffer and update reward tracking
         {
             let mut engine = self.engine.write().await;
             engine.record_experience(experience.clone());
+            // Update total_rewards counter for stats tracking
+            if let Err(e) = engine.update_reward(experience.reward) {
+                warn!("Failed to update reward: {}", e);
+            }
         }
 
         // Update count

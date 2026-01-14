@@ -35,6 +35,7 @@ enum TaskType {
 
 #[derive(Debug, Clone)]
 struct AgentState {
+    #[allow(dead_code)]
     id: String,
     current_load: usize,
     max_capacity: usize,
@@ -54,6 +55,7 @@ impl AgentState {
 
 struct Orchestrator {
     agents: HashMap<String, AgentState>,
+    #[allow(dead_code)]
     task_queue: Vec<Task>,
     completed_count: usize,
 }

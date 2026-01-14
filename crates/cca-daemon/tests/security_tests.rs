@@ -42,7 +42,7 @@ fn test_agent_role_validation() {
 
     for role in invalid_roles {
         // Invalid roles contain special chars or are not in allowlist
-        let is_valid = vec!["coordinator", "frontend", "backend", "dba", "devops", "security", "qa"]
+        let is_valid = ["coordinator", "frontend", "backend", "dba", "devops", "security", "qa"]
             .contains(&role);
         assert!(!is_valid);
     }
@@ -261,9 +261,9 @@ fn test_token_count_overflow() {
 fn test_websocket_frame_size() {
     let max_frame_size = 64 * 1024; // 64KB
 
-    let small_frame = vec![0u8; 100];
-    let large_frame = vec![0u8; max_frame_size];
-    let too_large = vec![0u8; max_frame_size + 1];
+    let small_frame = [0u8; 100];
+    let large_frame = [0u8; 64 * 1024];
+    let too_large = [0u8; 64 * 1024 + 1];
 
     assert!(small_frame.len() <= max_frame_size);
     assert!(large_frame.len() <= max_frame_size);
@@ -295,7 +295,7 @@ fn test_no_credentials_in_logs() {
 #[test]
 fn test_url_credential_masking() {
     let url = "postgres://user:password@localhost:5432/db";
-    let masked = url.split('@').last().unwrap_or("masked");
+    let masked = url.split('@').next_back().unwrap_or("masked");
 
     // Masked version should not contain credentials
     assert!(!masked.contains("password"));

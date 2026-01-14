@@ -523,7 +523,7 @@ class MyClass:
             .parse_content(content, CodeLanguage::Python, "test.py")
             .unwrap();
 
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
         assert!(chunks.iter().any(|c| c.chunk_type == ChunkType::Class && c.name == "MyClass"));
     }
 

@@ -320,7 +320,7 @@ where
 }
 
 /// Role-specific permission overrides for SEC-007
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct RolePermissions {
     /// Override allowed_tools for this role (if set, replaces default)
@@ -333,16 +333,6 @@ pub struct RolePermissions {
 
     /// Override permission mode for this role
     pub mode: Option<String>,
-}
-
-impl Default for RolePermissions {
-    fn default() -> Self {
-        Self {
-            allowed_tools: Vec::new(),
-            denied_tools: Vec::new(),
-            mode: None,
-        }
-    }
 }
 
 /// SEC-007: Permission configuration for Claude Code invocations

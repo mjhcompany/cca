@@ -442,7 +442,7 @@ fn format_tool_action(tool_name: &str, input: Option<&serde_json::Value>) -> Str
         "Glob" => {
             input.and_then(|i| i.get("pattern"))
                 .and_then(|p| p.as_str())
-                .map(|p| truncate_line(&p, 40))
+                .map(|p| truncate_line(p, 40))
                 .unwrap_or_default()
         }
         "Bash" => {
@@ -495,7 +495,7 @@ async fn worker(role: &str) -> Result<()> {
         });
 
         write
-            .send(Message::Text(auth_msg.to_string().into()))
+            .send(Message::Text(auth_msg.to_string()))
             .await
             .context("Failed to send authentication message")?;
 
@@ -526,7 +526,7 @@ async fn worker(role: &str) -> Result<()> {
     });
 
     write
-        .send(Message::Text(register_msg.to_string().into()))
+        .send(Message::Text(register_msg.to_string()))
         .await
         .context("Failed to send registration message")?;
 
@@ -686,7 +686,7 @@ Task: "#;
                                     },
                                     "id": request_id
                                 });
-                                let _ = write.send(Message::Text(response.to_string().into())).await;
+                                let _ = write.send(Message::Text(response.to_string())).await;
                                 continue;
                             }
                         };
@@ -801,7 +801,7 @@ Task: "#;
                                                             "status": "running"
                                                         }
                                                     });
-                                                    let _ = write.send(Message::Text(progress_msg.to_string().into())).await;
+                                                    let _ = write.send(Message::Text(progress_msg.to_string())).await;
                                                     last_progress_update = std::time::Instant::now();
                                                 }
                                             }
@@ -884,7 +884,7 @@ Task: "#;
                         };
 
                         println!("[SEND] Sending response via WebSocket...");
-                        if let Err(e) = write.send(Message::Text(response.to_string().into())).await
+                        if let Err(e) = write.send(Message::Text(response.to_string())).await
                         {
                             eprintln!("[ERROR] Failed to send response: {}", e);
                         } else {
@@ -902,7 +902,7 @@ Task: "#;
                             },
                             "id": request_id
                         });
-                        let _ = write.send(Message::Text(response.to_string().into())).await;
+                        let _ = write.send(Message::Text(response.to_string())).await;
                     }
                 }
             }

@@ -19,7 +19,6 @@
 //! - Feature extraction: < 1µs per state
 
 #![allow(dead_code)]
-#![allow(unused_imports)]
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
@@ -28,7 +27,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 // ============================================================================
 
 mod rl_bench {
-    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::collections::{HashMap, VecDeque};
 
     pub type Reward = f64;
 

@@ -59,7 +59,7 @@ pub fn apply_permissions_to_command(cmd: &mut Command, permissions: &Permissions
                 cmd.arg(denied.join(","));
             }
         }
-        "allowlist" | _ => {
+        _ => {
             // Allowlist mode - secure default
             // Uses --allowedTools to specify exactly what's permitted
             let allowed = permissions.get_allowed_tools(role);
@@ -105,7 +105,7 @@ pub fn apply_permissions_to_pty_command(cmd: &mut CommandBuilder, permissions: &
                 cmd.arg(denied.join(","));
             }
         }
-        "allowlist" | _ => {
+        _ => {
             let allowed = permissions.get_allowed_tools(role);
             let denied = permissions.get_denied_tools(role);
 

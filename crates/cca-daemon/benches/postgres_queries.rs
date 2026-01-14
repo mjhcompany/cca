@@ -306,7 +306,7 @@ fn bench_result_mapping(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("map", count), &rows, |b, rows| {
             b.iter(|| {
                 let results: Vec<PatternResult> =
-                    rows.iter().map(|r| ResultProcessor::map_to_pattern(r)).collect();
+                    rows.iter().map(ResultProcessor::map_to_pattern).collect();
                 results.len()
             })
         });
@@ -319,7 +319,7 @@ fn bench_result_ranking(c: &mut Criterion) {
     let rows = generate_result_rows(100, 768);
     let results: Vec<PatternResult> = rows
         .iter()
-        .map(|r| ResultProcessor::map_to_pattern(r))
+        .map(ResultProcessor::map_to_pattern)
         .collect();
 
     c.bench_function("postgres/result_ranking_100", |b| {
@@ -334,7 +334,7 @@ fn bench_result_filtering(c: &mut Criterion) {
     let rows = generate_result_rows(1000, 768);
     let results: Vec<PatternResult> = rows
         .iter()
-        .map(|r| ResultProcessor::map_to_pattern(r))
+        .map(ResultProcessor::map_to_pattern)
         .collect();
 
     let mut group = c.benchmark_group("postgres/filtering");

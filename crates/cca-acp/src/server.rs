@@ -679,7 +679,7 @@ impl AcpServer {
                 SendResult::DisconnectSlowConsumer => {
                     let agent_id_to_remove = agent_id;
                     drop(connections);
-                    let _ = self.disconnect(agent_id_to_remove);
+                    self.disconnect(agent_id_to_remove).await.ok();
                     false
                 }
             }

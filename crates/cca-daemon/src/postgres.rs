@@ -1068,6 +1068,7 @@ impl CodeChunkRepository {
     }
 
     /// Insert or update a code chunk with embedding
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert(
         &self,
         file_path: &str,

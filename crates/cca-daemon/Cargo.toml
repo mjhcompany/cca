@@ -19,7 +19,6 @@ path = "src/main.rs"
 [dependencies]
 cca-core.workspace = true
 cca-acp.workspace = true
-cca-mcp.workspace = true
 cca-rl.workspace = true
 
 tokio.workspace = true

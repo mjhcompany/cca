@@ -101,6 +101,7 @@ fn acquire_pid_lock() -> PidLockResult {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .mode(0o600)
         .open(&pid_file)
     {

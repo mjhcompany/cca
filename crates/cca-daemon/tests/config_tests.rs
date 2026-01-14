@@ -12,10 +12,10 @@ fn test_default_daemon_config() {
     let default_log_level = "info";
     let default_max_agents = 10;
 
-    assert!(!default_bind.is_empty());
+    assert_eq!(default_bind, "127.0.0.1:8580");
     assert!(default_max_agents > 0);
     assert!(default_max_agents <= 100);
-    assert!(!default_log_level.is_empty());
+    assert_eq!(default_log_level, "info");
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn test_default_learning_config() {
     let default_batch_size = 32;
     let default_update_interval = 300;
 
-    assert!(!default_algorithm.is_empty());
+    assert_eq!(default_algorithm, "ppo");
     assert!(default_batch_size > 0);
     assert!(default_update_interval > 0);
 }

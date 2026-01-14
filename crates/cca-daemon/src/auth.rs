@@ -28,21 +28,12 @@ use governor::{
 use tracing::{debug, warn};
 
 /// Authentication configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
     /// API keys that are allowed (loaded from config)
     pub api_keys: Vec<String>,
     /// Whether auth is required (false for development)
     pub required: bool,
-}
-
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self {
-            api_keys: Vec::new(),
-            required: false,
-        }
-    }
 }
 
 /// Paths that bypass authentication
@@ -64,7 +55,7 @@ pub async fn auth_middleware(
 
     // Check bypass paths
     let path = request.uri().path();
-    if BYPASS_PATHS.iter().any(|p| path == *p) {
+    if BYPASS_PATHS.contains(&path) {
         return Ok(next.run(request).await);
     }
 

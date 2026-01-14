@@ -2161,7 +2161,6 @@ async fn execute_delegations(
             let state = state.clone();
             let delegation = delegation.clone();
             let agent_id = *agent_id;
-            let timeout = timeout;
 
             async move {
                 let start = std::time::Instant::now();
@@ -2226,7 +2225,7 @@ async fn execute_delegations(
 
                 // Store as pattern in ReasoningBank
                 store_task_as_pattern(
-                    &state,
+                    state,
                     agent_id,
                     &delegation.role,
                     &delegation.task,

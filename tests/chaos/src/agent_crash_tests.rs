@@ -89,7 +89,7 @@ impl ChaosAgentManager {
             )));
         }
 
-        let id = format!("agent-{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+        let id = format!("agent-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let agent = MockAgent::new(&id, role);
         agents.insert(id.clone(), agent);
 
@@ -437,7 +437,7 @@ mod tests {
             count
         };
 
-        assert!(alive_count >= 4 && alive_count <= 6);
+        assert!((4..=6).contains(&alive_count));
     }
 
     #[tokio::test]

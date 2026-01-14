@@ -35,15 +35,16 @@ fn test_connection_state_transitions() {
     // connected -> disconnected
     // connected -> reconnecting -> connected
 
-    let valid_from_disconnected = vec!["connecting"];
-    let valid_from_connecting = vec!["connected", "disconnected"];
-    let valid_from_connected = vec!["disconnected", "reconnecting"];
-    let valid_from_reconnecting = vec!["connected", "disconnected"];
+    let valid_from_disconnected = ["connecting"];
+    let valid_from_connecting = ["connected", "disconnected"];
+    let valid_from_connected = ["disconnected", "reconnecting"];
+    let valid_from_reconnecting = ["connected", "disconnected"];
 
-    assert!(!valid_from_disconnected.is_empty());
-    assert!(!valid_from_connecting.is_empty());
-    assert!(!valid_from_connected.is_empty());
-    assert!(!valid_from_reconnecting.is_empty());
+    // Verify expected transition counts
+    assert_eq!(valid_from_disconnected.len(), 1);
+    assert_eq!(valid_from_connecting.len(), 2);
+    assert_eq!(valid_from_connected.len(), 2);
+    assert_eq!(valid_from_reconnecting.len(), 2);
 }
 
 // ============================================================================
@@ -272,7 +273,7 @@ fn test_outgoing_queue_capacity() {
 
 #[test]
 fn test_message_ordering() {
-    let messages = vec!["msg1", "msg2", "msg3"];
+    let messages = ["msg1", "msg2", "msg3"];
 
     // FIFO ordering
     assert_eq!(messages[0], "msg1");
