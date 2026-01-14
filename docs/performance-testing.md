@@ -530,3 +530,166 @@ curl http://localhost:9200/metrics | grep agent
 | Message latency | < 50ms (P99) | `message-latency.js` |
 | API latency | < 200ms (P95) | `api-throughput.js` |
 | Token reduction | 30%+ | `token-service.js` |
+
+---
+
+## Rust Micro-Benchmarks and Profiling
+
+In addition to the k6 load tests, CCA includes Rust-based micro-benchmarks using Criterion for detailed performance analysis of hot paths.
+
+### Available Benchmark Suites
+
+| Suite | Description | File |
+|-------|-------------|------|
+| `token_benchmarks` | Token counting and analysis | `benches/token_benchmarks.rs` |
+| `postgres_queries` | Database query patterns, vector serialization | `benches/postgres_queries.rs` |
+| `orchestrator` | Task routing and workload distribution | `benches/orchestrator.rs` |
+| `code_indexing` | Code parsing and chunk extraction | `benches/code_indexing.rs` |
+| `flamegraph_profile` | CPU profiling with flamegraph output | `benches/flamegraph_profile.rs` |
+| `compression_benchmarks` | Context compression algorithms | `benches/compression_benchmarks.rs` |
+| `rl_benchmarks` | Reinforcement learning engine | `benches/rl_benchmarks.rs` |
+
+### Running Benchmarks
+
+```bash
+# Run all benchmarks
+cargo bench --package cca-daemon
+
+# Run specific benchmark suite
+cargo bench --package cca-daemon --bench token_benchmarks
+
+# Quick benchmarks (fewer samples)
+cargo bench --package cca-daemon -- --sample-size 10
+
+# Using the perf script
+./scripts/perf.sh bench          # All benchmarks
+./scripts/perf.sh bench-quick    # Quick mode
+./scripts/perf.sh bench-suite token_benchmarks  # Specific suite
+```
+
+### Viewing Results
+
+Benchmark results are stored in `target/criterion/`:
+
+```bash
+# View HTML report
+./scripts/perf.sh report
+
+# Compare against baseline
+./scripts/perf.sh compare main
+
+# Generate and view in browser
+open target/criterion/report/index.html
+```
+
+### Flamegraph Generation
+
+Generate flamegraphs to identify CPU hot spots:
+
+```bash
+# Using pprof integration (recommended)
+./scripts/perf.sh flamegraph
+
+# Using cargo-flamegraph
+cargo install flamegraph
+cargo flamegraph --bench flamegraph_profile -- --bench
+
+# Using perf (Linux)
+cargo build --profile profiling
+perf record -g ./target/profiling/ccad
+perf script | stackcollapse-perf.pl | flamegraph.pl > profile.svg
+```
+
+Flamegraphs are saved to `target/criterion/*/profile/flamegraph.svg`.
+
+### Build Profiles
+
+Three build profiles are available for performance work:
+
+```toml
+# Release - production builds (fastest, no debug info)
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Profiling - release speed with debug symbols
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
+# Bench - optimized for accurate benchmarks
+[profile.bench]
+lto = true
+codegen-units = 1
+debug = false
+```
+
+Build for profiling:
+```bash
+cargo build --profile profiling
+```
+
+### Hot Paths Identified
+
+Based on benchmarks and profiling, these are the critical hot paths:
+
+1. **Token Counting** (`tokens.rs`)
+   - `TokenCounter::count()` - called on every content piece
+   - Target: < 1µs for typical messages (< 1KB)
+
+2. **N-gram Extraction** (`tokens.rs`)
+   - `ContextAnalyzer::extract_ngrams()` - O(n) where n = word count
+   - Target: < 100µs for typical contexts (< 10KB)
+
+3. **Vector Serialization** (`postgres.rs`)
+   - pgvector binary format serialization
+   - 80%+ faster than string format (PERF-002)
+
+4. **Task Routing** (`orchestrator.rs`)
+   - Workload distribution across agents
+   - Agent capability matching
+
+5. **Code Parsing** (`code_parser.rs`)
+   - Tree-sitter AST traversal
+   - Chunk extraction for semantic search
+
+### Benchmark Best Practices
+
+1. **Warm-up**: Criterion automatically handles warm-up; don't skip it
+2. **Sample Size**: Use at least 50 samples for statistical significance
+3. **Isolation**: Close other applications during benchmarks
+4. **Baseline**: Save baselines before major changes:
+   ```bash
+   ./scripts/perf.sh compare  # Saves as 'main'
+   # ... make changes ...
+   ./scripts/perf.sh compare main  # Compare against baseline
+   ```
+
+### Adding New Benchmarks
+
+To add a new benchmark suite:
+
+1. Create `crates/cca-daemon/benches/your_benchmark.rs`:
+   ```rust
+   use criterion::{criterion_group, criterion_main, Criterion};
+
+   fn bench_your_function(c: &mut Criterion) {
+       c.bench_function("your_function", |b| {
+           b.iter(|| your_function())
+       });
+   }
+
+   criterion_group!(benches, bench_your_function);
+   criterion_main!(benches);
+   ```
+
+2. Add to `Cargo.toml`:
+   ```toml
+   [[bench]]
+   name = "your_benchmark"
+   harness = false
+   ```
+
+3. Run: `cargo bench --bench your_benchmark`

@@ -17,6 +17,8 @@
 //! - Context analysis: < 100µs for typical contexts (< 10KB)
 //! - Redundancy detection: < 1ms for comparing two contexts
 
+#![allow(dead_code)]
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 // We need to access internal types - using a local module path

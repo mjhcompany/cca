@@ -25,6 +25,7 @@ ndarray = "0.16"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 criterion.workspace = true
+rand = "0.8"
 
 [[bench]]
 name = "rl_algorithm_benchmarks"

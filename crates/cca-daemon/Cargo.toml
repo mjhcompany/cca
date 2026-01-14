@@ -71,6 +71,8 @@ criterion.workspace = true
 pprof.workspace = true
 dhat.workspace = true
 rand = "0.8"
+uuid.workspace = true
+chrono.workspace = true
 
 # Token efficiency benchmarks
 [[bench]]

@@ -100,7 +100,8 @@ impl CodeParser {
 
     fn parse(&self, content: &str, language: CodeLanguage) -> Vec<CodeChunk> {
         let mut chunks = Vec::new();
-        let patterns = self.language_patterns.get(&language).unwrap_or(&vec![]);
+        let empty_patterns: Vec<&'static str> = vec![];
+        let patterns = self.language_patterns.get(&language).unwrap_or(&empty_patterns);
         let lines: Vec<&str> = content.lines().collect();
 
         let mut current_chunk: Option<(usize, String, String)> = None;
