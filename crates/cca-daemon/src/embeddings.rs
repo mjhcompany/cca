@@ -86,7 +86,7 @@ impl EmbeddingService {
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             error!("Ollama embedding API error: {} - {}", status, body);
-            anyhow::bail!("Ollama embedding API returned {}: {}", status, body);
+            anyhow::bail!("Ollama embedding API returned {status}: {body}");
         }
 
         let result = response

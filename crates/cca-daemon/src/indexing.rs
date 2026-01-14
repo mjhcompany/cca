@@ -338,7 +338,7 @@ async fn run_indexing_job(
                 }
             }
             Err(e) => {
-                let error_msg = format!("Failed to parse {:?}: {}", file_path, e);
+                let error_msg = format!("Failed to parse {}: {e}", file_path.display());
                 warn!("{}", error_msg);
                 errors.push(error_msg);
             }
@@ -395,7 +395,7 @@ fn collect_files(path: &Path, extensions: &[String], exclude_globs: &[Pattern]) 
     WalkDir::new(path)
         .follow_links(false)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.file_type().is_file())
         .filter(|e| {
             // Check extension
@@ -485,7 +485,7 @@ async fn process_chunk_batch(
             indexed
         }
         Err(e) => {
-            let error_msg = format!("Failed to generate embeddings: {}", e);
+            let error_msg = format!("Failed to generate embeddings: {e}");
             warn!("{}", error_msg);
             errors.push(error_msg);
             pending.clear();

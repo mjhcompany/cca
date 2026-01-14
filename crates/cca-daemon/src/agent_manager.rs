@@ -224,7 +224,7 @@ impl AgentManager {
         let role = &managed.agent.role;
         let claude_path = &self.config.agents.claude_path;
         let data_dir = self.config.daemon.get_data_dir();
-        let claude_md_path = data_dir.join("agents").join(format!("{}.md", role))
+        let claude_md_path = data_dir.join("agents").join(format!("{role}.md"))
             .to_string_lossy().to_string();
 
         info!("Starting interactive session for agent {}", agent_id);
@@ -450,7 +450,7 @@ impl AgentManager {
         let role = managed.agent.role.clone();
         let claude_path = self.config.agents.claude_path.clone();
         let data_dir = self.config.daemon.get_data_dir();
-        let claude_md_path = data_dir.join("agents").join(format!("{}.md", role))
+        let claude_md_path = data_dir.join("agents").join(format!("{role}.md"))
             .to_string_lossy().to_string();
 
         // Set current task
@@ -461,7 +461,7 @@ impl AgentManager {
         let entry = LogEntry {
             timestamp: Utc::now(),
             level: "INFO".to_string(),
-            message: format!("Starting task: {}", task_preview),
+            message: format!("Starting task: {task_preview}"),
         };
         managed.logs.push(entry);
         if managed.logs.len() > MAX_LOG_ENTRIES {
@@ -559,7 +559,7 @@ impl AgentManager {
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             self.record_task_result(agent_id, false, "", Some(&stderr));
-            Err(anyhow!("Claude Code failed: {}", stderr))
+            Err(anyhow!("Claude Code failed: {stderr}"))
         }
     }
 

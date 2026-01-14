@@ -92,7 +92,7 @@ fn acquire_pid_lock() -> PidLockResult {
     // Ensure parent directory exists
     if let Some(parent) = pid_file.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
-            return PidLockResult::Error(anyhow!("Failed to create PID directory: {}", e));
+            return PidLockResult::Error(anyhow!("Failed to create PID directory: {e}"));
         }
     }
 
@@ -106,7 +106,7 @@ fn acquire_pid_lock() -> PidLockResult {
         .open(&pid_file)
     {
         Ok(f) => f,
-        Err(e) => return PidLockResult::Error(anyhow!("Failed to open PID file: {}", e)),
+        Err(e) => return PidLockResult::Error(anyhow!("Failed to open PID file: {e}")),
     };
 
     // Try to acquire exclusive lock (non-blocking)
@@ -125,7 +125,7 @@ fn acquire_pid_lock() -> PidLockResult {
                 "PID file is locked by another process but PID is unreadable"
             ));
         }
-        return PidLockResult::Error(anyhow!("Failed to acquire PID lock: {}", err));
+        return PidLockResult::Error(anyhow!("Failed to acquire PID lock: {err}"));
     }
 
     // We have the exclusive lock. Now check if there's an existing PID
@@ -146,10 +146,10 @@ fn acquire_pid_lock() -> PidLockResult {
     // No valid running daemon - write our PID
     // Truncate file and write new PID
     if let Err(e) = file.set_len(0) {
-        return PidLockResult::Error(anyhow!("Failed to truncate PID file: {}", e));
+        return PidLockResult::Error(anyhow!("Failed to truncate PID file: {e}"));
     }
     if let Err(e) = file.seek(SeekFrom::Start(0)) {
-        return PidLockResult::Error(anyhow!("Failed to seek PID file: {}", e));
+        return PidLockResult::Error(anyhow!("Failed to seek PID file: {e}"));
     }
 
     PidLockResult::Acquired(file)
@@ -188,7 +188,7 @@ fn acquire_pid_lock() -> PidLockResult {
 
 /// Write PID to an already-locked PID file
 fn write_pid_to_locked_file(mut file: &File, pid: u32) -> Result<()> {
-    write!(file, "{}", pid).context("Failed to write PID")?;
+    write!(file, "{pid}").context("Failed to write PID")?;
     file.flush().context("Failed to flush PID file")?;
     Ok(())
 }

@@ -640,8 +640,7 @@ impl AcpServer {
                 SendResult::Sent => Ok(()),
                 SendResult::Dropped => {
                     Err(anyhow::anyhow!(
-                        "Message dropped due to backpressure for agent {}",
-                        agent_id
+                        "Message dropped due to backpressure for agent {agent_id}"
                     ))
                 }
                 SendResult::DisconnectSlowConsumer => {
@@ -650,8 +649,7 @@ impl AcpServer {
                     drop(connections);
                     self.disconnect(agent_id_to_remove).await.ok();
                     Err(anyhow::anyhow!(
-                        "Agent {} disconnected due to slow consumption",
-                        agent_id
+                        "Agent {agent_id} disconnected due to slow consumption"
                     ))
                 }
             }
@@ -847,7 +845,7 @@ impl AcpServer {
             info!("Agent {} disconnected", agent_id);
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Agent {} not found", agent_id))
+            Err(anyhow::anyhow!("Agent {agent_id} not found"))
         }
     }
 
@@ -874,7 +872,7 @@ impl AcpServer {
             // Extract tokens_used from response (default to 0 if not present)
             let tokens_used = result
                 .get("tokens_used")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
 
             if let Some(output) = result.get("output").and_then(|v: &serde_json::Value| v.as_str()) {

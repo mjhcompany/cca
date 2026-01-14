@@ -9,7 +9,6 @@ description = "CCA RL - Reinforcement Learning algorithms for task optimization"
 [dependencies]
 cca-core.workspace = true
 
-tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -24,7 +23,6 @@ rand = "0.8"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 criterion.workspace = true
-rand = "0.8"
 
 [[bench]]
 name = "rl_algorithm_benchmarks"

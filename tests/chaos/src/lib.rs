@@ -3,8 +3,32 @@
 //! This crate provides chaos testing capabilities for verifying system resilience:
 //! - Agent crash recovery
 //! - Redis disconnection handling
-//! - PostgreSQL failover testing
+//! - `PostgreSQL` failover testing
 //! - Graceful degradation scenarios
+
+// Clippy pedantic allows - these are intentional design choices
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::return_self_not_must_use)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::match_same_arms)]
+#![allow(clippy::single_match_else)]
+#![allow(clippy::format_push_string)]
+#![allow(clippy::bool_to_int_with_if)]
+#![allow(clippy::if_not_else)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::used_underscore_binding)]
+#![allow(clippy::no_effect_underscore_binding)]
+#![allow(clippy::unused_async)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::use_debug)]
+#![allow(clippy::unused_self)]
+#![allow(clippy::cast_lossless)]
 
 pub mod agent_crash_tests;
 pub mod degradation_tests;
@@ -144,7 +168,7 @@ impl ChaosMetrics {
         if self.requests_during_chaos == 0 {
             1.0
         } else {
-            self.successful_requests as f64 / self.requests_during_chaos as f64
+            f64::from(self.successful_requests) / f64::from(self.requests_during_chaos)
         }
     }
 }

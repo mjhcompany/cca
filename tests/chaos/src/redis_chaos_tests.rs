@@ -171,7 +171,7 @@ impl MockRedisPool {
             }
 
             // Exponential backoff
-            sleep(Duration::from_millis(50 * attempt as u64)).await;
+            sleep(Duration::from_millis(50 * u64::from(attempt))).await;
         }
 
         let mut metrics = self.metrics.write().await;
@@ -186,7 +186,7 @@ impl MockRedisPool {
     /// Check if all connections are connected
     pub async fn all_connected(&self) -> bool {
         let connections = self.connections.read().await;
-        connections.iter().all(|c| c.is_connected())
+        connections.iter().all(MockRedisConnection::is_connected)
     }
 
     /// Get pool status
@@ -443,7 +443,7 @@ impl CacheStats {
         if total == 0 {
             0.0
         } else {
-            self.hit_count as f64 / total as f64
+            f64::from(self.hit_count) / f64::from(total)
         }
     }
 }

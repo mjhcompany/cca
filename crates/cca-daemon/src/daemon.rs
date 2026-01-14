@@ -600,23 +600,36 @@ fn sanitize_broadcast_message(message: &str) -> String {
 /// Coordinator system prompt - enforces JSON delegation output
 const COORDINATOR_SYSTEM_PROMPT: &str = r#"You are a COORDINATOR agent. You do NOT execute tasks yourself.
 
-Your ONLY job is to decide which specialist agent should handle a task and output a JSON delegation.
+Your ONLY job is to analyze tasks, decompose complex ones into parallel subtasks, and delegate to specialists.
 
 Available specialists: backend, frontend, dba, devops, security, qa
 
 You MUST respond with ONLY a JSON object in this exact format:
-{"action":"delegate","delegations":[{"role":"AGENT_ROLE","task":"Task description for the specialist","context":"Optional context"}],"summary":"Brief summary"}
+{"action":"delegate","delegations":[{"role":"ROLE","task":"Task description","context":"Optional context"}],"summary":"Brief summary"}
 
-Example for "Analyze code structure":
-{"action":"delegate","delegations":[{"role":"backend","task":"Analyze the code structure and document components","context":"Code analysis request"}],"summary":"Delegating to backend specialist"}
+CRITICAL: For complex multi-step tasks, create MULTIPLE delegations that can run IN PARALLEL.
+
+Example 1 - Simple task "Analyze code structure":
+{"action":"delegate","delegations":[{"role":"backend","task":"Analyze code structure","context":"Code analysis"}],"summary":"Single backend task"}
+
+Example 2 - Complex task "Phase 7: Run clippy, fix warnings, add docs, run audit":
+{"action":"delegate","delegations":[
+  {"role":"backend","task":"Run cargo clippy and fix immediate warnings in crates/cca-daemon/benches and crates/cca-rl/benches","context":"Phase 7.1 - clippy fixes"},
+  {"role":"backend","task":"Run cargo clippy -- -W clippy::pedantic and fix remaining warnings","context":"Phase 7.2 - pedantic warnings"},
+  {"role":"backend","task":"Add doc comments to public APIs and remove unused exports","context":"Phase 7.3 - documentation"},
+  {"role":"devops","task":"Run cargo audit and remove unused dependencies from Cargo.toml","context":"Phase 7.4 - security audit"}
+],"summary":"Parallel execution of 4 Phase 7 subtasks"}
 
 RULES:
 - Output ONLY valid JSON, nothing else
-- Always delegate - never answer directly
-- Use "backend" for code analysis, API work
+- NEVER answer directly - always delegate
+- For multi-step/multi-phase tasks: CREATE MULTIPLE DELEGATIONS
+- Each delegation runs on a SEPARATE agent in parallel
+- Break numbered steps (1,2,3 or 7.1,7.2,7.3) into separate delegations
+- Use "backend" for code analysis, API work, Rust code changes
 - Use "frontend" for UI/UX work
 - Use "dba" for database work
-- Use "devops" for infrastructure
+- Use "devops" for infrastructure, CI/CD, dependencies, audits
 - Use "security" for security reviews
 - Use "qa" for testing"#;
 
@@ -962,7 +975,7 @@ async fn send_to_agent(
             return Json(SendToAgentResponse {
                 success: false,
                 output: None,
-                error: Some(format!("Invalid agent ID: {}", agent_id)),
+                error: Some(format!("Invalid agent ID: {agent_id}")),
                 duration_ms: start.elapsed().as_millis() as u64,
                 tokens_used: 0,
             });
@@ -1048,7 +1061,7 @@ async fn send_to_agent(
             Json(SendToAgentResponse {
                 success: false,
                 output: None,
-                error: Some(format!("Claude Code failed: {}", stderr)),
+                error: Some(format!("Claude Code failed: {stderr}")),
                 duration_ms: start.elapsed().as_millis() as u64,
                 tokens_used: 0,
             })
@@ -1370,7 +1383,7 @@ async fn delegate_task(
                 agent_id: agent_id.to_string(),
                 role: request.role.clone(),
                 output: None,
-                error: Some(format!("Agent error: {}", stderr)),
+                error: Some(format!("Agent error: {stderr}")),
                 duration_ms: start.elapsed().as_millis() as u64,
                 tokens_used: 0,
             })
@@ -1386,7 +1399,7 @@ async fn delegate_task(
                 agent_id: agent_id.to_string(),
                 role: request.role.clone(),
                 output: None,
-                error: Some(format!("Agent error: {}", e)),
+                error: Some(format!("Agent error: {e}")),
                 duration_ms: start.elapsed().as_millis() as u64,
                 tokens_used: 0,
             })
@@ -1542,7 +1555,7 @@ async fn create_task(
             available_roles.join(", ")
         )
     };
-    let context = format!("{}\n\n{}", COORDINATOR_SYSTEM_PROMPT, workers_info);
+    let context = format!("{COORDINATOR_SYSTEM_PROMPT}\n\n{workers_info}");
 
     // Send task to coordinator via WebSocket
     let timeout = std::time::Duration::from_secs(state.config.agents.default_timeout_seconds);
@@ -1589,7 +1602,7 @@ async fn create_task(
                             let mut errors = Vec::new();
 
                             if let Some(summary) = &coord_response.summary {
-                                combined_output.push_str(&format!("## Coordinator Summary\n{}\n\n", summary));
+                                combined_output.push_str(&format!("## Coordinator Summary\n{summary}\n\n"));
                             }
 
                             for (delegation, result) in coord_response.delegations.iter().zip(delegation_results.iter()) {
@@ -1602,7 +1615,7 @@ async fn create_task(
                                     all_success = false;
                                     if let Some(ref err) = result.error {
                                         errors.push(format!("{}: {}", delegation.role, err));
-                                        combined_output.push_str(&format!("Error: {}\n", err));
+                                        combined_output.push_str(&format!("Error: {err}\n"));
                                     }
                                 }
                                 combined_output.push_str("\n\n");
@@ -1804,7 +1817,7 @@ async fn create_task(
             }
         }
         Err(e) => {
-            let error_msg = format!("Coordinator error: {}", e);
+            let error_msg = format!("Coordinator error: {e}");
             error!(
                 "Task {} failed: coordinator {} error: {}",
                 task_id, coordinator_id, e

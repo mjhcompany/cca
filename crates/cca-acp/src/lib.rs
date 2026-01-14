@@ -19,6 +19,13 @@
 #![allow(clippy::unused_async)]
 #![allow(clippy::unused_self)]
 #![allow(clippy::map_unwrap_or)]
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::single_match_else)]
+#![allow(clippy::match_same_arms)]
+#![allow(clippy::redundant_else)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::manual_let_else)]
+#![allow(clippy::too_many_lines)]
 
 pub mod client;
 pub mod message;

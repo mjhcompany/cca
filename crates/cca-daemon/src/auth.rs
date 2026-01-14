@@ -396,8 +396,7 @@ fn rate_limit_response_with_type(retry_after: u64, remaining: u32, limit_type: &
             ("Content-Type", "application/json"),
         ],
         format!(
-            r#"{{"error":"Too many requests","message":"Rate limit exceeded. Please slow down.","limit_type":"{}","retry_after_seconds":{}}}"#,
-            limit_type, retry_after_str
+            r#"{{"error":"Too many requests","message":"Rate limit exceeded. Please slow down.","limit_type":"{limit_type}","retry_after_seconds":{retry_after_str}}}"#
         ),
     )
         .into_response()

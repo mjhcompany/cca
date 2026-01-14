@@ -87,8 +87,7 @@ impl TmuxManager {
         let spawned = self.spawned_count().await;
         if spawned >= MAX_AUTO_AGENTS {
             return Err(format!(
-                "Maximum auto-spawned agents reached ({})",
-                MAX_AUTO_AGENTS
+                "Maximum auto-spawned agents reached ({MAX_AUTO_AGENTS})"
             ));
         }
 
@@ -119,7 +118,7 @@ impl TmuxManager {
         };
 
         // Run the agent command in the pane
-        let cmd = format!("cca agent worker {}", role);
+        let cmd = format!("cca agent worker {role}");
         self.run_in_pane(&pane_id, &cmd)?;
 
         // Track the agent
@@ -145,11 +144,11 @@ impl TmuxManager {
         let output = Command::new("tmux")
             .args(["new-window", "-n", name, "-d"])
             .output()
-            .map_err(|e| format!("Failed to create tmux window: {}", e))?;
+            .map_err(|e| format!("Failed to create tmux window: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Tmux new-window failed: {}", stderr));
+            return Err(format!("Tmux new-window failed: {stderr}"));
         }
 
         debug!("Created tmux window: {}", name);
@@ -164,7 +163,7 @@ impl TmuxManager {
     fn setup_window_layout(&self, window_name: &str) -> Result<(), String> {
         // Split horizontally first (creates 2 panes side by side)
         let _ = Command::new("tmux")
-            .args(["split-window", "-h", "-t", &format!(":{}", window_name)])
+            .args(["split-window", "-h", "-t", &format!(":{window_name}")])
             .output();
 
         // Split each pane vertically (creates 4 panes in 2x2)
@@ -173,7 +172,7 @@ impl TmuxManager {
                 "split-window",
                 "-v",
                 "-t",
-                &format!(":{}.0", window_name),
+                &format!(":{window_name}.0"),
             ])
             .output();
 
@@ -182,7 +181,7 @@ impl TmuxManager {
                 "split-window",
                 "-v",
                 "-t",
-                &format!(":{}.2", window_name),
+                &format!(":{window_name}.2"),
             ])
             .output();
 
@@ -191,7 +190,7 @@ impl TmuxManager {
             .args([
                 "select-layout",
                 "-t",
-                &format!(":{}", window_name),
+                &format!(":{window_name}"),
                 "tiled",
             ])
             .output();
@@ -206,16 +205,16 @@ impl TmuxManager {
             .args([
                 "list-panes",
                 "-t",
-                &format!(":{}", window_name),
+                &format!(":{window_name}"),
                 "-F",
                 "#{pane_id}",
             ])
             .output()
-            .map_err(|e| format!("Failed to list panes: {}", e))?;
+            .map_err(|e| format!("Failed to list panes: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Tmux list-panes failed: {}", stderr));
+            return Err(format!("Tmux list-panes failed: {stderr}"));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -236,16 +235,16 @@ impl TmuxManager {
             .args([
                 "list-panes",
                 "-t",
-                &format!(":{}", window_name),
+                &format!(":{window_name}"),
                 "-F",
                 "#{pane_id}",
             ])
             .output()
-            .map_err(|e| format!("Failed to list panes: {}", e))?;
+            .map_err(|e| format!("Failed to list panes: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Tmux list-panes failed: {}", stderr));
+            return Err(format!("Tmux list-panes failed: {stderr}"));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -267,11 +266,11 @@ impl TmuxManager {
         let output = Command::new("tmux")
             .args(["send-keys", "-t", pane_id, command, "Enter"])
             .output()
-            .map_err(|e| format!("Failed to send keys to pane: {}", e))?;
+            .map_err(|e| format!("Failed to send keys to pane: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Tmux send-keys failed: {}", stderr));
+            return Err(format!("Tmux send-keys failed: {stderr}"));
         }
 
         debug!("Ran command in pane {}: {}", pane_id, command);
@@ -322,7 +321,7 @@ impl TmuxManager {
         let windows = self.windows.read().await;
         for window in windows.iter() {
             let _ = Command::new("tmux")
-                .args(["kill-window", "-t", &format!(":{}", window)])
+                .args(["kill-window", "-t", &format!(":{window}")])
                 .output();
         }
     }

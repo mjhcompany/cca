@@ -517,7 +517,7 @@ impl SystemStats {
         if self.total_requests == 0 {
             1.0
         } else {
-            (self.successful_requests + self.degraded_requests) as f64 / self.total_requests as f64
+            f64::from(self.successful_requests + self.degraded_requests) / f64::from(self.total_requests)
         }
     }
 
@@ -525,7 +525,7 @@ impl SystemStats {
         if self.total_requests == 0 {
             0.0
         } else {
-            self.degraded_requests as f64 / self.total_requests as f64
+            f64::from(self.degraded_requests) / f64::from(self.total_requests)
         }
     }
 
@@ -533,7 +533,7 @@ impl SystemStats {
         if self.total_requests == 0 {
             0.0
         } else {
-            self.failed_requests as f64 / self.total_requests as f64
+            f64::from(self.failed_requests) / f64::from(self.total_requests)
         }
     }
 }

@@ -101,7 +101,7 @@ impl ChaosAgentManager {
         let agents = self.agents.read().await;
         let agent = agents
             .get(agent_id)
-            .ok_or_else(|| ChaosError::ServiceUnavailable(format!("Agent {} not found", agent_id)))?;
+            .ok_or_else(|| ChaosError::ServiceUnavailable(format!("Agent {agent_id} not found")))?;
 
         agent.simulate_crash();
 
@@ -116,7 +116,7 @@ impl ChaosAgentManager {
         let agents = self.agents.read().await;
         let agent = agents
             .get(agent_id)
-            .ok_or_else(|| ChaosError::ServiceUnavailable(format!("Agent {} not found", agent_id)))?;
+            .ok_or_else(|| ChaosError::ServiceUnavailable(format!("Agent {agent_id} not found")))?;
 
         Ok(agent.is_alive())
     }
@@ -154,7 +154,7 @@ impl ChaosAgentManager {
         let agents = self.agents.read().await;
         let agent = agents
             .get(agent_id)
-            .ok_or_else(|| ChaosError::ServiceUnavailable(format!("Agent {} not found", agent_id)))?;
+            .ok_or_else(|| ChaosError::ServiceUnavailable(format!("Agent {agent_id} not found")))?;
 
         if agent.is_alive() {
             return Ok(()); // Already alive
@@ -191,7 +191,7 @@ impl ChaosAgentManager {
 impl ChaosTestable for ChaosAgentManager {
     async fn health_check(&self) -> ChaosResult<bool> {
         let agents = self.agents.read().await;
-        Ok(agents.values().all(|a| a.is_alive()))
+        Ok(agents.values().all(MockAgent::is_alive))
     }
 
     async fn inject_fault(&self, fault: FaultType) -> ChaosResult<()> {
@@ -284,7 +284,7 @@ impl ProcessAgent {
         if let Some(ref child) = self.process {
             let pid = Pid::from_raw(child.id() as i32);
             let sig = Signal::try_from(signal)
-                .map_err(|e| ChaosError::ProcessError(format!("Invalid signal: {}", e)))?;
+                .map_err(|e| ChaosError::ProcessError(format!("Invalid signal: {e}")))?;
             kill(pid, sig).map_err(|e: nix::Error| ChaosError::ProcessError(e.to_string()))?;
         }
         Ok(())

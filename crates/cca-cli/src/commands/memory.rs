@@ -138,7 +138,7 @@ async fn search(query: &str, limit: usize) -> Result<()> {
 
     let data: serde_json::Value = resp.json().await.context("Failed to parse response")?;
 
-    if let Some(false) = data.get("success").and_then(|v| v.as_bool()) {
+    if let Some(false) = data.get("success").and_then(serde_json::Value::as_bool) {
         println!(
             "Error: {}",
             data.get("error")
@@ -161,14 +161,14 @@ async fn search(query: &str, limit: usize) -> Result<()> {
             for p in patterns {
                 let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("-");
                 let ptype = p.get("pattern_type").and_then(|v| v.as_str()).unwrap_or("-");
-                let score = p.get("similarity").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let score = p.get("similarity").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
                 let content = p.get("content").and_then(|v| v.as_str()).unwrap_or("-");
                 let content_short = if content.len() > 27 {
                     format!("{}...", &content[..27])
                 } else {
                     content.to_string()
                 };
-                println!("{:<36} {:<12} {:<10.2} {:<30}", id, ptype, score, content_short);
+                println!("{id:<36} {ptype:<12} {score:<10.2} {content_short:<30}");
             }
         }
     }
@@ -389,10 +389,10 @@ async fn index_status(job_id: Option<&str>) -> Result<()> {
                 job.indexed_chunks, job.total_chunks
             );
             if let Some(started) = job.started_at {
-                println!("Started: {}", started);
+                println!("Started: {started}");
             }
             if let Some(completed) = job.completed_at {
-                println!("Completed: {}", completed);
+                println!("Completed: {completed}");
             }
         }
     } else {
@@ -422,7 +422,7 @@ async fn index_status(job_id: Option<&str>) -> Result<()> {
                 for job in jobs {
                     let id = job.get("job_id").and_then(|v| v.as_str()).unwrap_or("-");
                     let status = job.get("status").and_then(|v| v.as_str()).unwrap_or("-");
-                    let progress = job.get("progress_percent").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let progress = job.get("progress_percent").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
                     let path = job.get("path").and_then(|v| v.as_str()).unwrap_or("-");
                     let path_short = if path.len() > 17 {
                         format!("...{}", &path[path.len() - 17..])
@@ -430,8 +430,7 @@ async fn index_status(job_id: Option<&str>) -> Result<()> {
                         path.to_string()
                     };
                     println!(
-                        "{:<36} {:<12} {:<10.1}% {:<20}",
-                        id, status, progress, path_short
+                        "{id:<36} {status:<12} {progress:<10.1}% {path_short:<20}"
                     );
                 }
             }
@@ -470,7 +469,7 @@ async fn code_search(query: &str, limit: usize, language: Option<&str>) -> Resul
 
     let data: serde_json::Value = resp.json().await.context("Failed to parse response")?;
 
-    if let Some(false) = data.get("success").and_then(|v| v.as_bool()) {
+    if let Some(false) = data.get("success").and_then(serde_json::Value::as_bool) {
         println!(
             "Error: {}",
             data.get("error")
@@ -488,22 +487,22 @@ async fn code_search(query: &str, limit: usize, language: Option<&str>) -> Resul
                 let name = r.get("name").and_then(|v| v.as_str()).unwrap_or("-");
                 let chunk_type = r.get("chunk_type").and_then(|v| v.as_str()).unwrap_or("-");
                 let file_path = r.get("file_path").and_then(|v| v.as_str()).unwrap_or("-");
-                let start_line = r.get("start_line").and_then(|v| v.as_i64()).unwrap_or(0);
-                let end_line = r.get("end_line").and_then(|v| v.as_i64()).unwrap_or(0);
+                let start_line = r.get("start_line").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                let end_line = r.get("end_line").and_then(serde_json::Value::as_i64).unwrap_or(0);
                 let language = r.get("language").and_then(|v| v.as_str()).unwrap_or("-");
-                let similarity = r.get("similarity").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let similarity = r.get("similarity").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
                 let signature = r.get("signature").and_then(|v| v.as_str());
 
                 println!("{}. {} {} ({})", i + 1, chunk_type, name, language);
-                println!("   Location: {}:{}-{}", file_path, start_line, end_line);
-                println!("   Similarity: {:.2}", similarity);
+                println!("   Location: {file_path}:{start_line}-{end_line}");
+                println!("   Similarity: {similarity:.2}");
                 if let Some(sig) = signature {
                     let sig_short = if sig.len() > 70 {
                         format!("{}...", &sig[..70])
                     } else {
                         sig.to_string()
                     };
-                    println!("   Signature: {}", sig_short);
+                    println!("   Signature: {sig_short}");
                 }
                 println!();
             }
@@ -512,7 +511,7 @@ async fn code_search(query: &str, limit: usize, language: Option<&str>) -> Resul
 
     println!(
         "Found {} result(s)",
-        data.get("count").and_then(|v| v.as_i64()).unwrap_or(0)
+        data.get("count").and_then(serde_json::Value::as_i64).unwrap_or(0)
     );
 
     Ok(())

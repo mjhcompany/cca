@@ -98,7 +98,7 @@ impl Database {
 fn build_connection_url(base_url: &str, statement_timeout_ms: u64) -> String {
     // Parse URL to add/update statement_timeout parameter
     // PostgreSQL accepts options in the query string or as connection parameters
-    let timeout_param = format!("statement_timeout={}", statement_timeout_ms);
+    let timeout_param = format!("statement_timeout={statement_timeout_ms}");
 
     if base_url.contains('?') {
         // URL already has query parameters
@@ -122,10 +122,10 @@ fn build_connection_url(base_url: &str, statement_timeout_ms: u64) -> String {
                 &base_url[value_end..]
             )
         } else {
-            format!("{}&{}", base_url, timeout_param)
+            format!("{base_url}&{timeout_param}")
         }
     } else {
-        format!("{}?{}", base_url, timeout_param)
+        format!("{base_url}?{timeout_param}")
     }
 }
 

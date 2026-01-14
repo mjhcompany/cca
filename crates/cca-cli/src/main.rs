@@ -13,6 +13,15 @@
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::format_collect)]
 #![allow(clippy::no_effect_underscore_binding)]
+#![allow(clippy::single_match_else)]
+#![allow(clippy::format_push_string)]
+#![allow(clippy::if_not_else)]
+#![allow(clippy::used_underscore_binding)]
+#![allow(clippy::use_debug)]
+#![allow(clippy::map_unwrap_or)]
+#![allow(clippy::match_same_arms)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_wrap)]
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

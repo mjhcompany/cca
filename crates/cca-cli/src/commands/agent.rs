@@ -98,8 +98,7 @@ async fn resolve_worker_id(id_or_role: &str) -> Result<String> {
     }
 
     Err(anyhow::anyhow!(
-        "Worker '{}' not found. Use 'cca agent list' to see connected workers.",
-        id_or_role
+        "Worker '{id_or_role}' not found. Use 'cca agent list' to see connected workers."
     ))
 }
 
@@ -114,7 +113,7 @@ async fn list() -> Result<()> {
             let data: serde_json::Value = r.json().await?;
             let count = data["connected_agents"].as_u64().unwrap_or(0);
 
-            println!("\nConnected Workers: {}\n", count);
+            println!("\nConnected Workers: {count}\n");
 
             if let Some(workers) = data["workers"].as_array() {
                 if workers.is_empty() {
@@ -134,7 +133,7 @@ async fn list() -> Result<()> {
                         let id = worker["agent_id"].as_str().unwrap_or("-");
                         let short_id = safe_truncate(id, 8);
                         let role = worker["role"].as_str().unwrap_or("unregistered");
-                        println!("{:<10} {:<12} {}", short_id, role, id);
+                        println!("{short_id:<10} {role:<12} {id}");
                     }
                     println!();
                     println!("Use role name (e.g., 'backend') or short ID to interact with workers");
@@ -148,7 +147,7 @@ async fn list() -> Result<()> {
             println!("Failed to get workers: HTTP {}", r.status());
         }
         Err(e) => {
-            println!("Error: {}", e);
+            println!("Error: {e}");
         }
     }
 
@@ -162,7 +161,7 @@ async fn stop(id: &str) -> Result<()> {
     let agent_id = resolve_worker_id(id).await?;
     let short_id = safe_truncate(&agent_id, 8);
 
-    println!("Disconnecting worker {}...", short_id);
+    println!("Disconnecting worker {short_id}...");
 
     // Send disconnect request to daemon
     let resp = http::post_json(
@@ -173,11 +172,11 @@ async fn stop(id: &str) -> Result<()> {
     .context("Failed to send disconnect request")?;
 
     if resp.status().is_success() {
-        println!("Worker {} disconnected successfully", short_id);
+        println!("Worker {short_id} disconnected successfully");
     } else {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        println!("Failed to disconnect worker: {} - {}", status, body);
+        println!("Failed to disconnect worker: {status} - {body}");
     }
 
     Ok(())
@@ -190,7 +189,7 @@ async fn send(id: &str, message: &str) -> Result<()> {
     let agent_id = resolve_worker_id(id).await?;
     let short_id = safe_truncate(&agent_id, 8);
 
-    println!("Sending task to worker {}...", short_id);
+    println!("Sending task to worker {short_id}...");
 
     // Send task via daemon API
     let resp = http::post_json(
@@ -205,18 +204,18 @@ async fn send(id: &str, message: &str) -> Result<()> {
 
     if resp.status().is_success() {
         let data: serde_json::Value = resp.json().await?;
-        println!("\nResponse from worker {}:", short_id);
+        println!("\nResponse from worker {short_id}:");
         if let Some(output) = data["output"].as_str() {
-            println!("{}", output);
+            println!("{output}");
         } else if let Some(error) = data["error"].as_str() {
-            println!("Error: {}", error);
+            println!("Error: {error}");
         } else {
             println!("{}", serde_json::to_string_pretty(&data)?);
         }
     } else {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        println!("Failed to send task: {} - {}", status, body);
+        println!("Failed to send task: {status} - {body}");
     }
 
     Ok(())
@@ -234,10 +233,10 @@ async fn diag() -> Result<()> {
         Ok(r) if r.status().is_success() => {
             let data: serde_json::Value = r.json().await.unwrap_or_default();
             let status = data["status"].as_str().unwrap_or("unknown");
-            println!("[OK] status={}", status);
+            println!("[OK] status={status}");
         }
         Ok(r) => println!("[FAIL] HTTP {}", r.status()),
-        Err(e) => println!("[FAIL] {}", e),
+        Err(e) => println!("[FAIL] {e}"),
     }
 
     // 2. Check ACP WebSocket server
@@ -250,13 +249,13 @@ async fn diag() -> Result<()> {
             let port = data["port"].as_u64().unwrap_or(0);
             let agents = data["connected_agents"].as_u64().unwrap_or(0);
             if running {
-                println!("[OK] port={}, connected_workers={}", port, agents);
+                println!("[OK] port={port}, connected_workers={agents}");
             } else {
                 println!("[WARN] not running");
             }
         }
         Ok(r) => println!("[FAIL] HTTP {}", r.status()),
-        Err(e) => println!("[FAIL] {}", e),
+        Err(e) => println!("[FAIL] {e}"),
     }
 
     // 3. Check Redis
@@ -273,7 +272,7 @@ async fn diag() -> Result<()> {
             }
         }
         Ok(r) => println!("[SKIP] HTTP {}", r.status()),
-        Err(e) => println!("[FAIL] {}", e),
+        Err(e) => println!("[FAIL] {e}"),
     }
 
     // 4. Check PostgreSQL
@@ -285,13 +284,13 @@ async fn diag() -> Result<()> {
             let connected = data["connected"].as_bool().unwrap_or(false);
             let patterns = data["patterns_count"].as_i64().unwrap_or(0);
             if connected {
-                println!("[OK] patterns={}", patterns);
+                println!("[OK] patterns={patterns}");
             } else {
                 println!("[WARN] not connected");
             }
         }
         Ok(r) => println!("[SKIP] HTTP {}", r.status()),
-        Err(e) => println!("[FAIL] {}", e),
+        Err(e) => println!("[FAIL] {e}"),
     }
 
     // 5. Check RL Engine
@@ -303,10 +302,10 @@ async fn diag() -> Result<()> {
             let algo = data["algorithm"].as_str().unwrap_or("unknown");
             let steps = data["total_steps"].as_u64().unwrap_or(0);
             let exp = data["experience_count"].as_u64().unwrap_or(0);
-            println!("[OK] algo={}, steps={}, experiences={}", algo, steps, exp);
+            println!("[OK] algo={algo}, steps={steps}, experiences={exp}");
         }
         Ok(r) => println!("[SKIP] HTTP {}", r.status()),
-        Err(e) => println!("[FAIL] {}", e),
+        Err(e) => println!("[FAIL] {e}"),
     }
 
     // 6. List connected workers
@@ -323,7 +322,7 @@ async fn diag() -> Result<()> {
                         let id = worker["agent_id"].as_str().unwrap_or("-");
                         let short_id = safe_truncate(id, 8);
                         let role = worker["role"].as_str().unwrap_or("unregistered");
-                        println!("  {} ({})", short_id, role);
+                        println!("  {short_id} ({role})");
                     }
                 }
             } else {
@@ -349,7 +348,7 @@ async fn diag() -> Result<()> {
                         let status = task["status"].as_str().unwrap_or("-");
                         let desc = task["description"].as_str().unwrap_or("-");
                         let short_desc = truncate_line(desc, 40);
-                        println!("  {} [{}] {}", short_id, status, short_desc);
+                        println!("  {short_id} [{status}] {short_desc}");
                     }
                 }
             }
@@ -365,7 +364,7 @@ async fn diag() -> Result<()> {
             let data: serde_json::Value = r.json().await.unwrap_or_default();
             let total = data["total_tasks"].as_u64().unwrap_or(0);
             let pending = data["pending_tasks"].as_u64().unwrap_or(0);
-            println!("  Total tasks: {}, Pending: {}", total, pending);
+            println!("  Total tasks: {total}, Pending: {pending}");
         }
         _ => println!("  (failed to fetch)"),
     }
@@ -461,9 +460,9 @@ fn format_tool_action(tool_name: &str, input: Option<&serde_json::Value>) -> Str
     };
 
     if detail.is_empty() {
-        format!("{} {}", icon, tool_name)
+        format!("{icon} {tool_name}")
     } else {
-        format!("{} {} {}", icon, tool_name, detail)
+        format!("{icon} {tool_name} {detail}")
     }
 }
 
@@ -472,8 +471,8 @@ async fn worker(role: &str) -> Result<()> {
     let agent_id = Uuid::new_v4();
     let ws_url = acp_url();
 
-    println!("Starting {} agent worker (ID: {})", role, agent_id);
-    println!("Connecting to ACP server at {}...", ws_url);
+    println!("Starting {role} agent worker (ID: {agent_id})");
+    println!("Connecting to ACP server at {ws_url}...");
 
     // Connect to WebSocket
     let (ws_stream, _) = connect_async(&ws_url)
@@ -504,7 +503,7 @@ async fn worker(role: &str) -> Result<()> {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
                 if json.get("error").is_some() {
                     let err = json["error"]["message"].as_str().unwrap_or("Authentication failed");
-                    anyhow::bail!("ACP authentication failed: {}", err);
+                    anyhow::bail!("ACP authentication failed: {err}");
                 }
                 println!("Authenticated successfully");
             }
@@ -534,15 +533,15 @@ async fn worker(role: &str) -> Result<()> {
     if let Some(Ok(Message::Text(text))) = read.next().await {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
             if let Some(result) = json.get("result") {
-                if result.get("success").and_then(|s| s.as_bool()) == Some(false) {
+                if result.get("success").and_then(serde_json::Value::as_bool) == Some(false) {
                     let err = result.get("error").and_then(|e| e.as_str()).unwrap_or("Registration failed");
-                    anyhow::bail!("Role registration failed: {}", err);
+                    anyhow::bail!("Role registration failed: {err}");
                 }
             }
         }
     }
 
-    println!("Registered as {} worker. Waiting for tasks...", role);
+    println!("Registered as {role} worker. Waiting for tasks...");
     println!("Press Ctrl+C to stop.\n");
 
     // Get claude path from environment or default
@@ -551,7 +550,7 @@ async fn worker(role: &str) -> Result<()> {
     // Get data dir for agent markdown files
     let data_dir =
         std::env::var("CCA_DATA_DIR").unwrap_or_else(|_| "/usr/local/share/cca".to_string());
-    let claude_md_path = format!("{}/agents/{}.md", data_dir, role);
+    let claude_md_path = format!("{data_dir}/agents/{role}.md");
 
     // Main message loop
     while let Some(msg) = read.next().await {
@@ -566,9 +565,9 @@ async fn worker(role: &str) -> Result<()> {
                         let context = params.get("context").and_then(|c| c.as_str());
 
                         println!("\n{}", "=".repeat(60));
-                        println!("[TASK] Request ID: {}", request_id);
+                        println!("[TASK] Request ID: {request_id}");
                         println!("[TASK] Task ({} chars):", task.len());
-                        println!("{}", task);
+                        println!("{task}");
                         if let Some(ctx) = context {
                             println!("[TASK] Context provided ({} chars)", ctx.len());
                         }
@@ -583,12 +582,12 @@ Format: {"action": "delegate", "delegations": [{"role": "backend|frontend|dba|de
 
 Task: "#;
                             if let Some(ctx) = context {
-                                format!("{}{}\n\nContext:\n{}", json_instruction, task, ctx)
+                                format!("{json_instruction}{task}\n\nContext:\n{ctx}")
                             } else {
-                                format!("{}{}", json_instruction, task)
+                                format!("{json_instruction}{task}")
                             }
                         } else if let Some(ctx) = context {
-                            format!("{}\n\nContext:\n{}", task, ctx)
+                            format!("{task}\n\nContext:\n{ctx}")
                         } else {
                             task.to_string()
                         };
@@ -676,7 +675,7 @@ Task: "#;
                         {
                             Ok(c) => c,
                             Err(e) => {
-                                println!("[FAIL] Failed to spawn claude: {}", e);
+                                println!("[FAIL] Failed to spawn claude: {e}");
                                 let response = serde_json::json!({
                                     "jsonrpc": "2.0",
                                     "error": {
@@ -718,11 +717,11 @@ Task: "#;
                                                 match event.get("type").and_then(|t| t.as_str()) {
                                                     Some("system") => {
                                                         if event.get("subtype").and_then(|s| s.as_str()) == Some("init") {
-                                                            println!("  [{:>3}s] 🚀 Session initialized", elapsed);
+                                                            println!("  [{elapsed:>3}s] 🚀 Session initialized");
                                                         }
                                                     }
                                                     Some("user") => {
-                                                        println!("  [{:>3}s] 📝 Processing task...", elapsed);
+                                                        println!("  [{elapsed:>3}s] 📝 Processing task...");
                                                         current_action = "Processing task".to_string();
                                                     }
                                                     Some("assistant") => {
@@ -733,7 +732,7 @@ Task: "#;
                                                                     if item.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
                                                                         let tool_name = item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
                                                                         let action = format_tool_action(tool_name, item.get("input"));
-                                                                        println!("  [{:>3}s] {}", elapsed, action);
+                                                                        println!("  [{elapsed:>3}s] {action}");
                                                                         current_action = action;
                                                                     } else if item.get("type").and_then(|t| t.as_str()) == Some("text") {
                                                                         // Text output - show a preview
@@ -742,7 +741,7 @@ Task: "#;
                                                                                 let preview = text.lines().next().unwrap_or("");
                                                                                 if !preview.is_empty() && preview.len() > 5 {
                                                                                     let display = truncate_line(preview, 60);
-                                                                                    println!("  [{:>3}s] 💬 {}", elapsed, display);
+                                                                                    println!("  [{elapsed:>3}s] 💬 {display}");
                                                                                 }
                                                                             }
                                                                         }
@@ -752,39 +751,38 @@ Task: "#;
                                                         }
                                                     }
                                                     Some("result") => {
-                                                        let success = !event.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
+                                                        let success = !event.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
                                                         if success {
-                                                            final_result = event.get("result").and_then(|r| r.as_str()).map(|s| s.to_string());
-                                                            let duration = event.get("duration_ms").and_then(|d| d.as_u64()).unwrap_or(0);
+                                                            final_result = event.get("result").and_then(|r| r.as_str()).map(std::string::ToString::to_string);
+                                                            let duration = event.get("duration_ms").and_then(serde_json::Value::as_u64).unwrap_or(0);
 
                                                             // Extract token usage from result event
                                                             if let Some(usage) = event.get("usage") {
-                                                                let input = usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                                                                let output = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                                                                let input = usage.get("input_tokens").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                                                                let output = usage.get("output_tokens").and_then(serde_json::Value::as_u64).unwrap_or(0);
                                                                 total_tokens_used = input + output;
-                                                                println!("  [{:>3}s] ✅ Task completed ({}ms, {} tokens)", elapsed, duration, total_tokens_used);
+                                                                println!("  [{elapsed:>3}s] ✅ Task completed ({duration}ms, {total_tokens_used} tokens)");
                                                             } else {
                                                                 // Try alternate location for tokens
-                                                                let input = event.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                                                                let output = event.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                                                                let input = event.get("input_tokens").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                                                                let output = event.get("output_tokens").and_then(serde_json::Value::as_u64).unwrap_or(0);
                                                                 if input > 0 || output > 0 {
                                                                     total_tokens_used = input + output;
-                                                                    println!("  [{:>3}s] ✅ Task completed ({}ms, {} tokens)", elapsed, duration, total_tokens_used);
+                                                                    println!("  [{elapsed:>3}s] ✅ Task completed ({duration}ms, {total_tokens_used} tokens)");
                                                                 } else {
-                                                                    println!("  [{:>3}s] ✅ Task completed ({}ms)", elapsed, duration);
+                                                                    println!("  [{elapsed:>3}s] ✅ Task completed ({duration}ms)");
                                                                 }
                                                             }
                                                         } else {
-                                                            println!("  [{:>3}s] ❌ Task failed", elapsed);
+                                                            println!("  [{elapsed:>3}s] ❌ Task failed");
                                                         }
                                                     }
                                                     // Handle usage event (Claude may send this separately)
                                                     Some("usage") => {
-                                                        let input = event.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                                                        let output = event.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                                                        let input = event.get("input_tokens").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                                                        let output = event.get("output_tokens").and_then(serde_json::Value::as_u64).unwrap_or(0);
                                                         total_tokens_used = input + output;
-                                                        println!("  [{:>3}s] 📊 Token usage: {} input + {} output = {} total",
-                                                                 elapsed, input, output, total_tokens_used);
+                                                        println!("  [{elapsed:>3}s] 📊 Token usage: {input} input + {output} output = {total_tokens_used} total");
                                                     }
                                                     _ => {}
                                                 }
@@ -808,7 +806,7 @@ Task: "#;
                                         }
                                         Ok(None) => break,
                                         Err(e) => {
-                                            eprintln!("\n[ERROR] Reading stdout: {}", e);
+                                            eprintln!("\n[ERROR] Reading stdout: {e}");
                                             break;
                                         }
                                     }
@@ -839,7 +837,7 @@ Task: "#;
                         let response = match status {
                             Ok(s) if s.success() => {
                                 println!("[DONE] Success! Output: {} bytes, Tokens: {}", output.len(), total_tokens_used);
-                                println!("[SEND] Sending response for request {}", request_id);
+                                println!("[SEND] Sending response for request {request_id}");
                                 // Print first 200 chars of output for debugging
                                 let preview = truncate_line(&output, 200);
                                 println!("[PREVIEW] {}", preview.replace('\n', " "));
@@ -855,9 +853,9 @@ Task: "#;
                             }
                             Ok(s) => {
                                 println!("[FAIL] Task failed (exit code: {:?})", s.code());
-                                println!("[STDERR] {}", stderr_output);
+                                println!("[STDERR] {stderr_output}");
                                 if !output.is_empty() {
-                                    println!("[STDOUT] {}", output);
+                                    println!("[STDOUT] {output}");
                                 }
                                 serde_json::json!({
                                     "jsonrpc": "2.0",
@@ -870,7 +868,7 @@ Task: "#;
                                 })
                             }
                             Err(e) => {
-                                println!("[FAIL] Failed to wait for claude: {}", e);
+                                println!("[FAIL] Failed to wait for claude: {e}");
                                 serde_json::json!({
                                     "jsonrpc": "2.0",
                                     "error": {
@@ -886,7 +884,7 @@ Task: "#;
                         println!("[SEND] Sending response via WebSocket...");
                         if let Err(e) = write.send(Message::Text(response.to_string())).await
                         {
-                            eprintln!("[ERROR] Failed to send response: {}", e);
+                            eprintln!("[ERROR] Failed to send response: {e}");
                         } else {
                             println!("[SEND] Response sent successfully");
                         }
@@ -914,7 +912,7 @@ Task: "#;
                 break;
             }
             Err(e) => {
-                eprintln!("WebSocket error: {}", e);
+                eprintln!("WebSocket error: {e}");
                 break;
             }
             _ => {}

@@ -90,7 +90,7 @@ impl MockPgConnection {
         // Check timeout
         if start.elapsed() > timeout {
             return Err(ChaosError::Timeout {
-                operation: format!("Query execution: {}", query),
+                operation: format!("Query execution: {query}"),
             });
         }
 
@@ -455,8 +455,7 @@ impl MockTaskStore {
         // Execute insert query
         self.pool
             .query(&format!(
-                "INSERT INTO tasks (id, description) VALUES ('{}', '{}')",
-                id, description
+                "INSERT INTO tasks (id, description) VALUES ('{id}', '{description}')"
             ))
             .await?;
 
@@ -478,7 +477,7 @@ impl MockTaskStore {
     pub async fn get_task(&self, id: &str) -> ChaosResult<Option<TaskRecord>> {
         // Execute select query
         self.pool
-            .query_replica(&format!("SELECT * FROM tasks WHERE id = '{}'", id))
+            .query_replica(&format!("SELECT * FROM tasks WHERE id = '{id}'"))
             .await?;
 
         let tasks = self.tasks.read().await;
@@ -489,8 +488,7 @@ impl MockTaskStore {
     pub async fn update_status(&self, id: &str, status: &str) -> ChaosResult<()> {
         self.pool
             .query(&format!(
-                "UPDATE tasks SET status = '{}' WHERE id = '{}'",
-                status, id
+                "UPDATE tasks SET status = '{status}' WHERE id = '{id}'"
             ))
             .await?;
 
@@ -511,7 +509,7 @@ impl MockTaskStore {
         // Execute delete
         match conn
             .execute(
-                &format!("DELETE FROM tasks WHERE id = '{}'", id),
+                &format!("DELETE FROM tasks WHERE id = '{id}'"),
                 Duration::from_secs(30),
             )
             .await

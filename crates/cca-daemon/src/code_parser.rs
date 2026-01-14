@@ -152,10 +152,10 @@ impl CodeParser {
     /// Parse a file and extract code chunks
     pub fn parse_file(&mut self, path: &Path) -> Result<Vec<CodeChunk>> {
         let language = Self::detect_language(path)
-            .ok_or_else(|| anyhow::anyhow!("Unsupported file type: {:?}", path))?;
+            .ok_or_else(|| anyhow::anyhow!("Unsupported file type: {}", path.display()))?;
 
         let content = std::fs::read_to_string(path)
-            .context(format!("Failed to read file: {:?}", path))?;
+            .context(format!("Failed to read file: {}", path.display()))?;
 
         let file_path = path.to_string_lossy().to_string();
         self.parse_content(&content, language, &file_path)
@@ -169,7 +169,7 @@ impl CodeParser {
         file_path: &str,
     ) -> Result<Vec<CodeChunk>> {
         let parser = self.parsers.get_mut(&language)
-            .ok_or_else(|| anyhow::anyhow!("No parser for language: {:?}", language))?;
+            .ok_or_else(|| anyhow::anyhow!("No parser for language: {language:?}"))?;
 
         let tree = parser
             .parse(content, None)
@@ -338,7 +338,7 @@ impl CodeParser {
                             return parent
                                 .child_by_field_name("name")
                                 .and_then(|n| n.utf8_text(source).ok())
-                                .map(|s| s.to_string());
+                                .map(std::string::ToString::to_string);
                         }
                     }
                     return Some("anonymous".to_string());
@@ -358,7 +358,7 @@ impl CodeParser {
                     return type_spec
                         .and_then(|spec| spec.child_by_field_name("name"))
                         .and_then(|n| n.utf8_text(source).ok())
-                        .map(|s| s.to_string());
+                        .map(std::string::ToString::to_string);
                 }
                 _ => return None,
             },
@@ -371,7 +371,7 @@ impl CodeParser {
                     // C/C++ function definitions have declarator child
                     return node
                         .child_by_field_name("declarator")
-                        .and_then(|d| self.find_identifier(&d, source));
+                        .and_then(|d| Self::find_identifier(&d, source));
                 }
                 "struct_specifier" | "class_specifier" | "enum_specifier" => "name",
                 _ => return None,
@@ -380,18 +380,18 @@ impl CodeParser {
 
         node.child_by_field_name(name_field)
             .and_then(|n| n.utf8_text(source).ok())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
     }
 
     /// Find identifier in a declarator (for C/C++)
-    fn find_identifier(&self, node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
+    fn find_identifier(node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
         if node.kind() == "identifier" {
-            return node.utf8_text(source).ok().map(|s| s.to_string());
+            return node.utf8_text(source).ok().map(std::string::ToString::to_string);
         }
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if let Some(name) = self.find_identifier(&child, source) {
+            if let Some(name) = Self::find_identifier(&child, source) {
                 return Some(name);
             }
         }
