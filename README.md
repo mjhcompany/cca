@@ -125,18 +125,48 @@ Or manually add to your Claude Code MCP configuration (`~/.claude/settings.json`
 
 ### Usage
 
-Once configured, use CCA tools directly in Claude Code:
+Once configured, use CCA tools directly in Claude Code. 17 MCP tools are available across 5 categories:
 
+**Task Management**
 | Tool | Description |
 |------|-------------|
-| `cca_task` | Send tasks to the Coordinator agent |
-| `cca_status` | Check daemon and task status |
-| `cca_agents` | List running agents |
-| `cca_activity` | View agent activity |
-| `cca_memory` | Query the ReasoningBank |
-| `cca_broadcast` | Send messages to all agents |
-| `cca_rl_status` | View RL engine statistics |
-| `cca_tokens_analyze` | Analyze token usage |
+| `cca_task` | Send tasks to the Coordinator for intelligent routing |
+| `cca_status` | Check system or specific task status |
+| `cca_activity` | View current activity of all agents |
+
+**Agent Control**
+| Tool | Description |
+|------|-------------|
+| `cca_agents` | List all running agents and their status |
+| `cca_broadcast` | Send messages to all connected agents |
+| `cca_workloads` | Get workload distribution across agents |
+
+**Memory & Learning**
+| Tool | Description |
+|------|-------------|
+| `cca_memory` | Query ReasoningBank for learned patterns |
+| `cca_rl_status` | View RL engine statistics and state |
+| `cca_rl_train` | Trigger training on collected experiences |
+| `cca_rl_algorithm` | Set RL algorithm (q_learning, dqn, ppo) |
+
+**Token Optimization**
+| Tool | Description |
+|------|-------------|
+| `cca_tokens_analyze` | Analyze content for token usage and redundancy |
+| `cca_tokens_compress` | Compress content (30%+ reduction target) |
+| `cca_tokens_metrics` | Get token efficiency metrics per agent |
+| `cca_tokens_recommendations` | Get recommendations for token efficiency |
+
+**Code Intelligence**
+| Tool | Description |
+|------|-------------|
+| `cca_index_codebase` | Index codebase for semantic search |
+| `cca_search_code` | Search code using semantic similarity |
+
+**Communication**
+| Tool | Description |
+|------|-------------|
+| `cca_acp_status` | Get ACP WebSocket server status |
 
 ## Documentation
 
