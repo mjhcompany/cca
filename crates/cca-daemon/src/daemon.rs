@@ -33,10 +33,10 @@ use crate::rl::compute_reward;
 
 use crate::agent_manager::{AgentManager, apply_permissions_to_command};
 use crate::auth::{
-    auth_middleware, create_rate_limiter_state, rate_limit_middleware,
-    AuthConfig, RateLimitConfig,
+    create_rate_limiter_state, dynamic_auth_middleware, rate_limit_middleware,
+    DynamicAuthConfig, RateLimitConfig,
 };
-use crate::config::Config;
+use crate::config::{Config, ReloadResult, SharedReloadableConfig};
 use crate::orchestrator::Orchestrator;
 use crate::postgres::PostgresServices;
 use crate::redis::{PubSubMessage, RedisAgentState, RedisServices};
@@ -56,6 +56,9 @@ use crate::validation::{
 #[derive(Clone)]
 pub struct DaemonState {
     pub config: Config,
+    /// Hot-reloadable configuration (API keys, rate limits, agent settings)
+    /// This allows updating these values without restarting the daemon
+    pub reloadable_config: SharedReloadableConfig,
     pub agent_manager: Arc<RwLock<AgentManager>>,
     pub orchestrator: Arc<RwLock<Orchestrator>>,
     pub tasks: Arc<RwLock<HashMap<String, TaskState>>>,
@@ -232,8 +235,12 @@ impl CCADaemon {
             }
         };
 
+        // Create hot-reloadable config wrapper
+        let reloadable_config = Arc::new(RwLock::new(config.to_reloadable()));
+
         let state = DaemonState {
             config: config.clone(),
+            reloadable_config,
             agent_manager: agent_manager.clone(),
             orchestrator: orchestrator.clone(),
             tasks: Arc::new(RwLock::new(HashMap::new())),
@@ -291,6 +298,16 @@ impl CCADaemon {
             task_cleanup_job(tasks_ref).await;
         });
 
+        // Start SIGHUP handler for config reload (Unix only)
+        #[cfg(unix)]
+        {
+            let reloadable_config = self.state.reloadable_config.clone();
+            tokio::spawn(async move {
+                sighup_handler(reloadable_config).await;
+            });
+            info!("SIGHUP handler enabled for config reload (systemd compatible)");
+        }
+
         // Serve HTTP API with graceful shutdown
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -328,10 +345,11 @@ impl CCADaemon {
 /// Create the API router with state
 /// SEC-004: Includes per-IP rate limiting middleware for DoS protection
 fn create_router(state: DaemonState) -> Router {
-    // Create auth config from daemon config
+    // Create dynamic auth config using reloadable configuration
     // SECURITY: Use is_auth_required() which enforces auth in production builds
-    let auth_config = AuthConfig {
-        api_keys: state.config.daemon.api_keys.clone(),
+    // Note: The 'required' flag is NOT reloadable for security reasons
+    let auth_config = DynamicAuthConfig {
+        config: state.reloadable_config.clone(),
         required: state.config.daemon.is_auth_required(),
     };
 
@@ -388,8 +406,11 @@ fn create_router(state: DaemonState) -> Router {
         .route("/api/v1/tokens/compress", post(tokens_compress))
         .route("/api/v1/tokens/metrics", get(tokens_metrics))
         .route("/api/v1/tokens/recommendations", get(tokens_recommendations))
+        // Admin endpoints for configuration management
+        .route("/api/v1/admin/config/reload", post(reload_config))
+        .route("/api/v1/admin/config/reloadable", get(get_reloadable_config))
         // Apply auth middleware (bypasses /health automatically)
-        .layer(axum::middleware::from_fn_with_state(auth_config, auth_middleware));
+        .layer(axum::middleware::from_fn_with_state(auth_config, dynamic_auth_middleware));
 
     // SEC-004: Apply per-IP and per-API-key rate limiting if configured (rate_limit_rps > 0)
     if state.config.daemon.rate_limit_rps > 0 {
@@ -3928,4 +3949,200 @@ async fn tokens_recommendations(State(state): State<DaemonState>) -> Json<serde_
         "count": recommendations.len(),
         "total_potential_savings": total_potential
     }))
+}
+
+// ============================================================================
+// SIGHUP Signal Handler for Configuration Reload
+// ============================================================================
+
+/// Handle SIGHUP signal for configuration reload (Unix only)
+///
+/// This allows systemd and other service managers to trigger config reload
+/// using `systemctl reload ccad` or `kill -HUP <pid>`.
+#[cfg(unix)]
+async fn sighup_handler(reloadable_config: SharedReloadableConfig) {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut stream = match signal(SignalKind::hangup()) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to register SIGHUP handler: {}", e);
+            return;
+        }
+    };
+
+    loop {
+        stream.recv().await;
+        info!("SIGHUP received, reloading configuration...");
+
+        // Load new configuration
+        let new_config = match Config::load() {
+            Ok(c) => c,
+            Err(e) => {
+                error!("SIGHUP reload failed: could not load config: {}", e);
+                continue;
+            }
+        };
+
+        // Extract reloadable parts and compare
+        let new_reloadable = new_config.to_reloadable();
+
+        let current_config = reloadable_config.read().await;
+        let changed_fields = current_config.diff(&new_reloadable);
+        drop(current_config);
+
+        if changed_fields.is_empty() {
+            info!("SIGHUP reload: no changes detected");
+            continue;
+        }
+
+        // Apply the new configuration
+        let mut config = reloadable_config.write().await;
+        *config = new_reloadable;
+        drop(config);
+
+        info!(
+            "SIGHUP reload successful. Changed fields: {:?}",
+            changed_fields
+        );
+    }
+}
+
+// ============================================================================
+// Configuration Hot-Reload Endpoints
+// ============================================================================
+
+/// Reload configuration from file without restarting the daemon
+///
+/// This endpoint reloads hot-reloadable configuration values from the config file.
+/// The following are reloadable:
+/// - API keys (daemon.api_keys, daemon.api_key_configs)
+/// - Rate limits (daemon.rate_limit_*)
+/// - Agent settings (agents.default_timeout_seconds, agents.permissions)
+/// - Learning settings (learning.enabled, learning.training_batch_size)
+///
+/// Non-reloadable settings (require daemon restart):
+/// - Bind addresses and ports
+/// - Database URLs
+/// - ACP WebSocket port
+async fn reload_config(State(state): State<DaemonState>) -> Json<ReloadResult> {
+    info!("Configuration reload requested via API");
+
+    // Find the config file
+    let config_file = Config::find_config_file_path();
+    let config_file_str = config_file.as_ref().map(|p| p.display().to_string());
+
+    // Try to load the new configuration
+    let new_config = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to load configuration: {}", e);
+            return Json(ReloadResult {
+                success: false,
+                config_file: config_file_str,
+                changed_fields: vec![],
+                error: Some(format!("Failed to load configuration: {}", e)),
+            });
+        }
+    };
+
+    // Extract reloadable parts
+    let new_reloadable = new_config.to_reloadable();
+
+    // Compare with current config and get list of changes
+    let current_config = state.reloadable_config.read().await;
+    let changed_fields = current_config.diff(&new_reloadable);
+    drop(current_config);
+
+    if changed_fields.is_empty() {
+        info!("Configuration reload: no changes detected");
+        return Json(ReloadResult {
+            success: true,
+            config_file: config_file_str,
+            changed_fields: vec![],
+            error: None,
+        });
+    }
+
+    // Apply the new configuration
+    let mut config = state.reloadable_config.write().await;
+    *config = new_reloadable;
+    drop(config);
+
+    info!(
+        "Configuration reloaded successfully. Changed fields: {:?}",
+        changed_fields
+    );
+
+    Json(ReloadResult {
+        success: true,
+        config_file: config_file_str,
+        changed_fields,
+        error: None,
+    })
+}
+
+/// Response for current reloadable configuration
+#[derive(Debug, Serialize)]
+struct ReloadableConfigResponse {
+    success: bool,
+    config_file: Option<String>,
+    reloadable_fields: Vec<String>,
+    current_values: serde_json::Value,
+}
+
+/// Get current reloadable configuration values
+///
+/// Returns the current values of all hot-reloadable configuration fields.
+/// Useful for debugging and verification after a reload.
+async fn get_reloadable_config(State(state): State<DaemonState>) -> Json<ReloadableConfigResponse> {
+    let config = state.reloadable_config.read().await;
+    let config_file = Config::find_config_file_path().map(|p| p.display().to_string());
+
+    // List of reloadable fields
+    let reloadable_fields = vec![
+        "api_keys".to_string(),
+        "api_key_configs".to_string(),
+        "rate_limit_rps".to_string(),
+        "rate_limit_burst".to_string(),
+        "rate_limit_global_rps".to_string(),
+        "rate_limit_api_key_rps".to_string(),
+        "rate_limit_api_key_burst".to_string(),
+        "default_timeout_seconds".to_string(),
+        "permissions.mode".to_string(),
+        "permissions.allowed_tools".to_string(),
+        "permissions.denied_tools".to_string(),
+        "token_budget_per_task".to_string(),
+        "learning_enabled".to_string(),
+        "training_batch_size".to_string(),
+    ];
+
+    // Build current values (redact API keys for security)
+    let api_key_count = config.api_keys.len();
+    let current_values = serde_json::json!({
+        "api_keys_count": api_key_count,
+        "api_key_configs_count": config.api_key_configs.len(),
+        "rate_limit_rps": config.rate_limit_rps,
+        "rate_limit_burst": config.rate_limit_burst,
+        "rate_limit_global_rps": config.rate_limit_global_rps,
+        "rate_limit_api_key_rps": config.rate_limit_api_key_rps,
+        "rate_limit_api_key_burst": config.rate_limit_api_key_burst,
+        "default_timeout_seconds": config.default_timeout_seconds,
+        "permissions": {
+            "mode": config.permissions.mode,
+            "allowed_tools": config.permissions.allowed_tools,
+            "denied_tools": config.permissions.denied_tools,
+            "allow_network": config.permissions.allow_network,
+        },
+        "token_budget_per_task": config.token_budget_per_task,
+        "learning_enabled": config.learning_enabled,
+        "training_batch_size": config.training_batch_size,
+    });
+
+    Json(ReloadableConfigResponse {
+        success: true,
+        config_file,
+        reloadable_fields,
+        current_values,
+    })
 }

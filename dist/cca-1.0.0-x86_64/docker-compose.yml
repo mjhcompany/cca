@@ -1,0 +1,43 @@
+# CCA Docker Compose - Redis and PostgreSQL
+# Customize ports in install.conf before running install.sh
+
+services:
+  redis:
+    image: redis:alpine
+    container_name: cca-redis
+    ports:
+      - "16379:6379"
+    volumes:
+      - cca-redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: pgvector/pgvector:pg18
+    container_name: cca-postgres
+    environment:
+      POSTGRES_USER: cca
+      POSTGRES_PASSWORD: cca_secure_password
+      POSTGRES_DB: cca
+    ports:
+      - "15432:5432"
+    volumes:
+      - cca-postgres-data:/var/lib/postgresql
+    restart: unless-stopped
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_preload_libraries=vector"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cca -d cca"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  cca-redis-data:
+  cca-postgres-data:

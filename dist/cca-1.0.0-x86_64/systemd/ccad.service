@@ -1,0 +1,27 @@
+[Unit]
+Description=CCA Daemon - Claude Code Agents Orchestration
+# Note: Redis and PostgreSQL can be on remote hosts or non-standard ports.
+# Configure their URLs in /usr/local/etc/cca/cca.toml
+# If running locally, add dependencies like: After=postgresql.service redis.service
+After=network.target
+
+[Service]
+Type=simple
+User=cca
+Group=cca
+EnvironmentFile=/usr/local/etc/cca/cca.env
+ExecStart=/usr/local/bin/ccad --config /usr/local/etc/cca/cca.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log/cca /usr/local/share/cca
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

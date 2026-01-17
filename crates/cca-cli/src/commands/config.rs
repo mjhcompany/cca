@@ -3,6 +3,13 @@
 use anyhow::Result;
 use clap::Subcommand;
 
+use super::http;
+
+/// Get the daemon URL from environment or use default
+fn daemon_url() -> String {
+    std::env::var("CCA_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:8580".to_string())
+}
+
 #[derive(Subcommand)]
 pub enum ConfigCommands {
     /// Show current configuration
@@ -20,6 +27,18 @@ pub enum ConfigCommands {
         #[arg(short, long)]
         force: bool,
     },
+    /// Reload configuration without restarting daemon
+    ///
+    /// Hot-reloads configuration values that can be changed at runtime:
+    /// - API keys
+    /// - Rate limits
+    /// - Agent permissions and timeouts
+    /// - Learning settings
+    ///
+    /// Note: Database URLs, bind addresses, and ports require a full restart.
+    Reload,
+    /// Show current reloadable configuration values
+    Reloadable,
 }
 
 pub async fn run(cmd: ConfigCommands) -> Result<()> {
@@ -27,6 +46,8 @@ pub async fn run(cmd: ConfigCommands) -> Result<()> {
         ConfigCommands::Show => show().await,
         ConfigCommands::Set { key, value } => set(&key, &value).await,
         ConfigCommands::Init { force } => init(force).await,
+        ConfigCommands::Reload => reload().await,
+        ConfigCommands::Reloadable => show_reloadable().await,
     }
 }
 
@@ -128,4 +149,124 @@ compression_algorithm = "context_distillation"
     println!("Configuration file created: {config_path}");
 
     Ok(())
+}
+
+/// Reload configuration via daemon API
+async fn reload() -> Result<()> {
+    println!("Reloading daemon configuration...\n");
+
+    match http::post_json(
+        &format!("{}/api/v1/admin/config/reload", daemon_url()),
+        &serde_json::json!({}),
+    )
+    .await
+    {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                let result: serde_json::Value = resp.json().await?;
+
+                if result["success"].as_bool().unwrap_or(false) {
+                    println!("Configuration reloaded successfully!");
+
+                    if let Some(config_file) = result["config_file"].as_str() {
+                        println!("Config file: {}", config_file);
+                    }
+
+                    if let Some(changed) = result["changed_fields"].as_array() {
+                        if changed.is_empty() {
+                            println!("\nNo changes detected.");
+                        } else {
+                            println!("\nChanged fields:");
+                            for field in changed {
+                                println!("  - {}", field.as_str().unwrap_or("unknown"));
+                            }
+                        }
+                    }
+                } else {
+                    let error = result["error"]
+                        .as_str()
+                        .unwrap_or("Unknown error");
+                    println!("Failed to reload configuration: {}", error);
+                }
+            } else {
+                println!(
+                    "Failed to reload configuration: HTTP {}",
+                    resp.status()
+                );
+            }
+        }
+        Err(e) => {
+            println!("Failed to connect to daemon: {}", e);
+            println!("\nIs the daemon running? Start it with: cca daemon start");
+        }
+    }
+
+    Ok(())
+}
+
+/// Show current reloadable configuration values
+async fn show_reloadable() -> Result<()> {
+    println!("Current Reloadable Configuration");
+    println!("================================\n");
+
+    match http::get(&format!("{}/api/v1/admin/config/reloadable", daemon_url())).await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                let result: serde_json::Value = resp.json().await?;
+
+                if let Some(config_file) = result["config_file"].as_str() {
+                    println!("Config file: {}\n", config_file);
+                }
+
+                println!("Hot-reloadable fields:");
+                if let Some(fields) = result["reloadable_fields"].as_array() {
+                    for field in fields {
+                        println!("  - {}", field.as_str().unwrap_or("unknown"));
+                    }
+                }
+
+                println!("\nCurrent values:");
+                if let Some(values) = result["current_values"].as_object() {
+                    print_config_values(values, 0);
+                }
+            } else {
+                println!(
+                    "Failed to get reloadable config: HTTP {}",
+                    resp.status()
+                );
+            }
+        }
+        Err(e) => {
+            println!("Failed to connect to daemon: {}", e);
+            println!("\nIs the daemon running? Start it with: cca daemon start");
+        }
+    }
+
+    Ok(())
+}
+
+/// Helper to pretty-print nested JSON config values
+fn print_config_values(obj: &serde_json::Map<String, serde_json::Value>, indent: usize) {
+    let prefix = "  ".repeat(indent);
+    for (key, value) in obj {
+        match value {
+            serde_json::Value::Object(nested) => {
+                println!("{}{}:", prefix, key);
+                print_config_values(nested, indent + 1);
+            }
+            serde_json::Value::Array(arr) => {
+                if arr.is_empty() {
+                    println!("{}{}: []", prefix, key);
+                } else {
+                    println!("{}{}:", prefix, key);
+                    for item in arr {
+                        println!("{}  - {}", prefix, item);
+                    }
+                }
+            }
+            _ => {
+                println!("{}{}: {}", prefix, key, value);
+            }
+        }
+    }
 }

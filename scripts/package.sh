@@ -86,7 +86,9 @@ else
     fi
 fi
 
-PACKAGE_NAME="cca-${VERSION}-${TARGET}"
+# Simplify architecture name for package (e.g., x86_64-unknown-linux-gnu -> x86_64)
+ARCH=$(echo "$TARGET" | cut -d'-' -f1)
+PACKAGE_NAME="cca-${VERSION}-${ARCH}"
 PACKAGE_DIR="${OUTPUT_DIR}/${PACKAGE_NAME}"
 
 echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
@@ -156,8 +158,10 @@ echo -e "  Creating systemd service file..."
 cat > "$PACKAGE_DIR/systemd/ccad.service" << 'EOF'
 [Unit]
 Description=CCA Daemon - Claude Code Agents Orchestration
-After=network.target postgresql.service redis.service
-Wants=postgresql.service redis.service
+# Note: Redis and PostgreSQL can be on remote hosts or non-standard ports.
+# Configure their URLs in /usr/local/etc/cca/cca.toml
+# If running locally, add dependencies like: After=postgresql.service redis.service
+After=network.target
 
 [Service]
 Type=simple
@@ -635,30 +639,30 @@ DOCKERCOMPOSE
 echo ""
 echo -e "${YELLOW}Creating distribution archive...${NC}"
 cd "$OUTPUT_DIR"
-tar -czvf "${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
+tar -czvf "${PACKAGE_NAME}.tgz" "${PACKAGE_NAME}"
 
 # Calculate checksums
 echo -e "${YELLOW}Generating checksums...${NC}"
-sha256sum "${PACKAGE_NAME}.tar.gz" > "${PACKAGE_NAME}.tar.gz.sha256"
+sha256sum "${PACKAGE_NAME}.tgz" > "${PACKAGE_NAME}.tgz.sha256"
 
 # Summary
-ARCHIVE_SIZE=$(du -h "${PACKAGE_NAME}.tar.gz" | cut -f1)
+ARCHIVE_SIZE=$(du -h "${PACKAGE_NAME}.tgz" | cut -f1)
 
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║              Package Created Successfully!                 ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  Package:   ${BLUE}${OUTPUT_DIR}/${PACKAGE_NAME}.tar.gz${NC}"
+echo -e "  Package:   ${BLUE}${OUTPUT_DIR}/${PACKAGE_NAME}.tgz${NC}"
 echo -e "  Size:      ${BLUE}${ARCHIVE_SIZE}${NC}"
-echo -e "  Checksum:  ${BLUE}${OUTPUT_DIR}/${PACKAGE_NAME}.tar.gz.sha256${NC}"
+echo -e "  Checksum:  ${BLUE}${OUTPUT_DIR}/${PACKAGE_NAME}.tgz.sha256${NC}"
 echo ""
 echo -e "  ${YELLOW}Contents:${NC}"
-tar -tzf "${PACKAGE_NAME}.tar.gz" | head -20
+tar -tzf "${PACKAGE_NAME}.tgz" | head -20
 echo "  ..."
 echo ""
 echo -e "  ${YELLOW}Distribution:${NC}"
-echo -e "    1. Copy ${PACKAGE_NAME}.tar.gz to target machine"
-echo -e "    2. Extract: tar -xzf ${PACKAGE_NAME}.tar.gz"
+echo -e "    1. Copy ${PACKAGE_NAME}.tgz to target machine"
+echo -e "    2. Extract: tar -xzf ${PACKAGE_NAME}.tgz"
 echo -e "    3. Install: cd ${PACKAGE_NAME} && sudo ./install.sh"
 echo ""

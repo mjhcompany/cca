@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "cca-acp"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "cca-chaos-tests"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "cca-cli"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "cca-core",
@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "cca-core"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "dirs",
@@ -457,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "cca-daemon"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "cca-mcp"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "cca-rl"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "cca-core",

@@ -6,6 +6,9 @@
 //!
 //! Rate limiting uses a token bucket algorithm with configurable rates.
 //! `SEC-004`: Per-IP rate limiting to prevent DoS attacks.
+//!
+//! Hot-reload support: The auth middleware can use SharedReloadableConfig
+//! for dynamic API key updates without service restart.
 
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
@@ -27,24 +30,27 @@ use governor::{
 };
 use tracing::{debug, warn};
 
-/// Authentication configuration
-#[derive(Debug, Clone, Default)]
-pub struct AuthConfig {
-    /// API keys that are allowed (loaded from config)
-    pub api_keys: Vec<String>,
-    /// Whether auth is required (false for development)
-    pub required: bool,
-}
+use crate::config::SharedReloadableConfig;
 
 /// Paths that bypass authentication
 const BYPASS_PATHS: &[&str] = &["/health", "/api/v1/health"];
 
-/// Authentication middleware function
+/// Dynamic authentication configuration that reads from SharedReloadableConfig
+/// This allows hot-reloading of API keys without restarting the daemon
+#[derive(Clone)]
+pub struct DynamicAuthConfig {
+    /// Shared reloadable configuration
+    pub config: SharedReloadableConfig,
+    /// Whether auth is required (from static config, not reloadable for security)
+    pub required: bool,
+}
+
+/// Authentication middleware with hot-reload support
 ///
-/// Checks for valid API key in X-API-Key header or Authorization: Bearer header.
-/// Returns 401 Unauthorized if auth is required and no valid key is provided.
-pub async fn auth_middleware(
-    State(config): State<AuthConfig>,
+/// Reads API keys from SharedReloadableConfig on each request, allowing
+/// API key changes to take effect immediately without daemon restart.
+pub async fn dynamic_auth_middleware(
+    State(config): State<DynamicAuthConfig>,
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, Response> {
@@ -58,6 +64,12 @@ pub async fn auth_middleware(
     if BYPASS_PATHS.contains(&path) {
         return Ok(next.run(request).await);
     }
+
+    // Read API keys from reloadable config (hot-reload enabled)
+    let api_keys = {
+        let reload_config = config.config.read().await;
+        reload_config.api_keys.clone()
+    };
 
     // Check X-API-Key header
     let api_key = request
@@ -74,14 +86,14 @@ pub async fn auth_middleware(
 
     // Validate API key using constant-time comparison to prevent timing attacks
     if let Some(key) = api_key {
-        if config.api_keys.iter().any(|k| constant_time_eq(k, key)) {
+        if api_keys.iter().any(|k| constant_time_eq(k, key)) {
             return Ok(next.run(request).await);
         }
     }
 
     // Validate bearer token using constant-time comparison to prevent timing attacks
     if let Some(token) = bearer_token {
-        if config.api_keys.iter().any(|k| constant_time_eq(k, token)) {
+        if api_keys.iter().any(|k| constant_time_eq(k, token)) {
             return Ok(next.run(request).await);
         }
     }

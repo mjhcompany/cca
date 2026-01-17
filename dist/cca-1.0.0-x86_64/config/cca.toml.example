@@ -1,0 +1,209 @@
+# CCA Configuration File
+# Copy this file to cca.toml and adjust as needed
+
+[daemon]
+# Address for the daemon to bind to
+bind_address = "127.0.0.1:9200"
+
+# Log level: trace, debug, info, warn, error
+log_level = "info"
+
+# Maximum number of concurrent agents
+max_agents = 10
+
+[redis]
+# Redis connection URL
+url = "redis://localhost:6380"
+
+# Connection pool size
+pool_size = 10
+
+# TTL for cached context in seconds (1 hour default)
+context_ttl_seconds = 3600
+
+[postgres]
+# PostgreSQL connection URL
+url = "postgres://cca:cca@localhost:5433/cca"
+
+# Connection pool size
+pool_size = 10
+
+# Maximum connections
+max_connections = 20
+
+[agents]
+# Default timeout for agent operations in seconds
+default_timeout_seconds = 300
+
+# Enable context compression
+context_compression = true
+
+# Token budget per task
+token_budget_per_task = 50000
+
+# SEC-007: Permission configuration for Claude Code invocations
+# This replaces the blanket --dangerously-skip-permissions flag with granular control
+# See docs/security-hardening.md for comprehensive security documentation
+[agents.permissions]
+# Permission mode: "allowlist" (default, secure), "sandbox", or "dangerous" (legacy)
+# - allowlist: Uses --allowedTools with configured tool list (RECOMMENDED)
+# - sandbox: Minimal read-only permissions, expects external sandboxing (container/VM)
+# - dangerous: Uses --dangerously-skip-permissions (NOT RECOMMENDED, legacy only)
+#
+# ============================================================================
+# CRITICAL SECURITY WARNING: "dangerous" mode
+# ============================================================================
+# DO NOT USE "dangerous" mode in production. This mode:
+#   - Disables ALL Claude Code permission checks
+#   - Allows agents to read/write ANY file (including .env, credentials, secrets)
+#   - Allows agents to execute ANY command (including sudo, rm -rf, etc.)
+#   - Bypasses all safety prompts and confirmations
+#   - Creates severe security risks: data exfiltration, system compromise, etc.
+#
+# "dangerous" mode is ONLY acceptable when ALL of these conditions are met:
+#   1. Agent runs in a fully isolated container/VM with no host access
+#   2. Container has no network access or strictly controlled egress
+#   3. Container has no volume mounts to sensitive host paths
+#   4. Container runs unprivileged with dropped capabilities
+#   5. External monitoring detects anomalous behavior
+#
+# Even then, prefer "allowlist" or "sandbox" mode for defense-in-depth.
+# ============================================================================
+mode = "allowlist"
+
+# Tools allowed without prompting when mode is "allowlist"
+# Format: "ToolName" or "ToolName(pattern)" for pattern-based restrictions
+# Examples: "Read", "Write(src/**)", "Bash(git *)", "Bash(npm test)"
+allowed_tools = [
+    "Read",                    # File reading is generally safe
+    "Glob",                    # Glob patterns for file discovery
+    "Grep",                    # Code search/exploration
+    "Write(src/**)",           # Write to source files
+    "Write(tests/**)",         # Write to test files
+    "Write(docs/**)",          # Write to documentation
+    "Bash(git status)",        # Safe git operations
+    "Bash(git diff*)",
+    "Bash(git log*)",
+    "Bash(git show*)",
+    "Bash(git branch*)",
+]
+
+# Tools explicitly denied (blocklist) - applied in all modes except "dangerous"
+# These patterns block dangerous operations even if they match allowed patterns
+denied_tools = [
+    "Bash(rm -rf *)",          # Destructive file deletion
+    "Bash(rm -r *)",           # Recursive deletion
+    "Bash(sudo *)",            # Privilege escalation
+    "Bash(su *)",              # User switching
+    "Read(.env*)",             # Sensitive environment files
+    "Write(.env*)",
+    "Read(*credentials*)",     # Credential files
+    "Write(*credentials*)",
+    "Read(*secret*)",          # Secret files
+    "Write(*secret*)",
+    "Bash(chmod 777 *)",       # Insecure permissions
+    "Bash(chown *)",           # Ownership changes
+]
+
+# Working directory restriction (optional)
+# Agents can only access files under this path
+# Empty means current working directory
+working_dir = ""
+
+# Whether to allow network access in Bash commands
+# When false, automatically blocks: curl, wget, nc, netcat
+allow_network = false
+
+# Role-specific permission overrides
+# Allows different roles to have different permission levels
+# Each role can override mode, allowed_tools, and denied_tools
+[agents.permissions.role_overrides.coordinator]
+# Coordinator gets read-only access (sandbox mode for safety)
+mode = "sandbox"
+allowed_tools = ["Read", "Glob", "Grep"]
+denied_tools = []
+
+# Agent role configurations
+[agents.roles.coordinator]
+claude_md = "agents/coordinator.md"
+priority = 1
+
+[agents.roles.frontend]
+claude_md = "agents/frontend.md"
+priority = 2
+
+[agents.roles.backend]
+claude_md = "agents/backend.md"
+priority = 2
+
+[agents.roles.dba]
+claude_md = "agents/dba.md"
+priority = 3
+
+[agents.roles.devops]
+claude_md = "agents/devops.md"
+priority = 3
+
+[agents.roles.security]
+claude_md = "agents/security.md"
+priority = 2
+
+[agents.roles.qa]
+claude_md = "agents/qa.md"
+priority = 3
+
+[acp]
+# ACP WebSocket port
+websocket_port = 9100
+
+# Reconnection interval in milliseconds
+reconnect_interval_ms = 1000
+
+# Maximum reconnection attempts
+max_reconnect_attempts = 5
+
+[mcp]
+# Enable MCP server
+enabled = true
+
+# MCP server bind address
+bind_address = "127.0.0.1:9201"
+
+[learning]
+# Enable RL learning
+enabled = true
+
+# Default RL algorithm: q_learning, ppo, dqn
+default_algorithm = "ppo"
+
+# Training batch size
+training_batch_size = 32
+
+# Update interval in seconds
+update_interval_seconds = 300
+
+[embeddings]
+# Enable semantic search with embeddings via Ollama
+# When enabled, patterns are stored with embeddings and memory search uses semantic similarity
+enabled = false
+
+# Ollama API URL - set this to your Ollama server
+ollama_url = "http://localhost:11434"
+
+# Embedding model to use (nomic-embed-text is recommended for quality/performance balance)
+# Other options: mxbai-embed-large (better quality, slower), all-minilm (faster, lower quality)
+model = "nomic-embed-text:latest"
+
+# Embedding dimension (768 for nomic-embed-text, 1024 for mxbai-embed-large)
+# This must match the model's output dimension
+dimension = 768
+
+[token_efficiency]
+# Enable token efficiency optimization
+enabled = true
+
+# Target reduction percentage (0.30 = 30%)
+target_reduction = 0.30
+
+# Compression algorithm: context_distillation, summary_injection
+compression_algorithm = "context_distillation"

@@ -1,10 +1,12 @@
 //! Configuration loading for CCA Daemon
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use config::{ConfigBuilder, Environment, File};
 use serde::Deserialize;
+use tokio::sync::RwLock;
 
 /// Configuration for the daemon
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -670,7 +672,12 @@ impl Config {
 
     /// Find the configuration file
     fn find_config_file() -> Option<PathBuf> {
-        // Check in order: CCA_CONFIG env, ./cca.toml, ~/.config/cca/cca.toml
+        Self::find_config_file_path()
+    }
+
+    /// Find the configuration file path (public for reload)
+    pub fn find_config_file_path() -> Option<PathBuf> {
+        // Check in order: CCA_CONFIG env, ./cca.toml, /usr/local/etc/cca/cca.toml, ~/.config/cca/cca.toml
         if let Ok(path) = std::env::var("CCA_CONFIG") {
             let path = PathBuf::from(path);
             if path.exists() {
@@ -683,6 +690,12 @@ impl Config {
             return Some(local);
         }
 
+        // System-wide config (installed location)
+        let system = PathBuf::from("/usr/local/etc/cca/cca.toml");
+        if system.exists() {
+            return Some(system);
+        }
+
         if let Some(home) = dirs::home_dir() {
             let user_config = home.join(".config").join("cca").join("cca.toml");
             if user_config.exists() {
@@ -691,5 +704,144 @@ impl Config {
         }
 
         None
+    }
+
+    /// Extract reloadable configuration for hot-reload
+    pub fn to_reloadable(&self) -> ReloadableConfig {
+        ReloadableConfig {
+            // Auth settings
+            api_keys: self.daemon.api_keys.clone(),
+            api_key_configs: self.daemon.api_key_configs.clone(),
+            // Rate limiting settings
+            rate_limit_rps: self.daemon.rate_limit_rps,
+            rate_limit_burst: self.daemon.rate_limit_burst,
+            rate_limit_global_rps: self.daemon.rate_limit_global_rps,
+            rate_limit_api_key_rps: self.daemon.rate_limit_api_key_rps,
+            rate_limit_api_key_burst: self.daemon.rate_limit_api_key_burst,
+            // Agent settings
+            default_timeout_seconds: self.agents.default_timeout_seconds,
+            permissions: self.agents.permissions.clone(),
+            token_budget_per_task: self.agents.token_budget_per_task,
+            // Learning settings
+            learning_enabled: self.learning.enabled,
+            training_batch_size: self.learning.training_batch_size,
+        }
+    }
+}
+
+/// Hot-reloadable configuration fields
+///
+/// These configuration values can be updated at runtime without restarting the daemon.
+/// Changes to these fields take effect immediately after a reload.
+///
+/// Note: Database URLs, bind addresses, and port numbers are NOT reloadable
+/// as they require service recreation which would break existing connections.
+#[derive(Debug, Clone)]
+pub struct ReloadableConfig {
+    // Auth settings - can be reloaded without breaking connections
+    /// API keys for authentication
+    pub api_keys: Vec<String>,
+    /// API keys with role-based permissions
+    pub api_key_configs: Vec<ApiKeyConfig>,
+
+    // Rate limiting settings - can be reloaded (new limits apply to new requests)
+    /// Requests per second per IP
+    pub rate_limit_rps: u32,
+    /// Burst size for IP rate limiting
+    pub rate_limit_burst: u32,
+    /// Global rate limit
+    pub rate_limit_global_rps: u32,
+    /// Requests per second per API key
+    pub rate_limit_api_key_rps: u32,
+    /// Burst size for API key rate limiting
+    pub rate_limit_api_key_burst: u32,
+
+    // Agent settings - can be reloaded for new tasks
+    /// Default timeout for agent operations
+    pub default_timeout_seconds: u64,
+    /// Permission configuration
+    pub permissions: PermissionsConfig,
+    /// Token budget per task
+    pub token_budget_per_task: u64,
+
+    // Learning settings - can be reloaded
+    /// Whether learning is enabled
+    pub learning_enabled: bool,
+    /// Training batch size
+    pub training_batch_size: usize,
+}
+
+impl Default for ReloadableConfig {
+    fn default() -> Self {
+        let config = Config::default();
+        config.to_reloadable()
+    }
+}
+
+/// Wrapper for thread-safe reloadable configuration
+pub type SharedReloadableConfig = Arc<RwLock<ReloadableConfig>>;
+
+/// Result of a configuration reload operation
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReloadResult {
+    /// Whether the reload was successful
+    pub success: bool,
+    /// Config file that was reloaded
+    pub config_file: Option<String>,
+    /// Fields that were changed
+    pub changed_fields: Vec<String>,
+    /// Error message if reload failed
+    pub error: Option<String>,
+}
+
+impl ReloadableConfig {
+    /// Compare with another config and return list of changed fields
+    pub fn diff(&self, other: &ReloadableConfig) -> Vec<String> {
+        let mut changes = Vec::new();
+
+        if self.api_keys != other.api_keys {
+            changes.push("api_keys".to_string());
+        }
+        if self.api_key_configs.len() != other.api_key_configs.len() {
+            changes.push("api_key_configs".to_string());
+        }
+        if self.rate_limit_rps != other.rate_limit_rps {
+            changes.push("rate_limit_rps".to_string());
+        }
+        if self.rate_limit_burst != other.rate_limit_burst {
+            changes.push("rate_limit_burst".to_string());
+        }
+        if self.rate_limit_global_rps != other.rate_limit_global_rps {
+            changes.push("rate_limit_global_rps".to_string());
+        }
+        if self.rate_limit_api_key_rps != other.rate_limit_api_key_rps {
+            changes.push("rate_limit_api_key_rps".to_string());
+        }
+        if self.rate_limit_api_key_burst != other.rate_limit_api_key_burst {
+            changes.push("rate_limit_api_key_burst".to_string());
+        }
+        if self.default_timeout_seconds != other.default_timeout_seconds {
+            changes.push("default_timeout_seconds".to_string());
+        }
+        if self.permissions.mode != other.permissions.mode {
+            changes.push("permissions.mode".to_string());
+        }
+        if self.permissions.allowed_tools != other.permissions.allowed_tools {
+            changes.push("permissions.allowed_tools".to_string());
+        }
+        if self.permissions.denied_tools != other.permissions.denied_tools {
+            changes.push("permissions.denied_tools".to_string());
+        }
+        if self.token_budget_per_task != other.token_budget_per_task {
+            changes.push("token_budget_per_task".to_string());
+        }
+        if self.learning_enabled != other.learning_enabled {
+            changes.push("learning_enabled".to_string());
+        }
+        if self.training_batch_size != other.training_batch_size {
+            changes.push("training_batch_size".to_string());
+        }
+
+        changes
     }
 }
