@@ -1080,6 +1080,22 @@ async fn spawn_agent(
 
     match manager.spawn(role.clone()).await {
         Ok(agent_id) => {
+            // Register agent in PostgreSQL for pattern FK references
+            if let Some(ref postgres) = state.postgres {
+                if let Err(e) = postgres
+                    .agents
+                    .register_with_id(
+                        agent_id.0,
+                        &role.to_string(),
+                        None,
+                        serde_json::json!({}),
+                    )
+                    .await
+                {
+                    warn!("Failed to register agent {} in PostgreSQL: {}", agent_id, e);
+                }
+            }
+
             // Update agent state in Redis
             update_agent_redis_state(
                 &state.redis,
@@ -2566,6 +2582,22 @@ async fn find_available_agent_excluding(
                 5,
             ).await;
             info!("Auto-registered {} agent {} in orchestrator for workload tracking", role_name, agent_id);
+
+            // Also register in PostgreSQL for pattern FK references
+            if let Some(ref postgres) = state.postgres {
+                if let Err(e) = postgres
+                    .agents
+                    .register_with_id(
+                        agent_id.0,
+                        &role_name,
+                        None,
+                        serde_json::json!({"auto_registered": true}),
+                    )
+                    .await
+                {
+                    warn!("Failed to register agent {} in PostgreSQL: {}", agent_id, e);
+                }
+            }
         }
 
         return Some(agent_id);

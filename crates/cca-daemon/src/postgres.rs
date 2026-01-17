@@ -157,11 +157,27 @@ impl AgentRepository {
     /// Create a new agent
     pub async fn create(&self, role: &str, name: Option<&str>, config: serde_json::Value) -> Result<Uuid> {
         let id = Uuid::new_v4();
+        self.register_with_id(id, role, name, config).await?;
+        Ok(id)
+    }
 
+    /// Register an agent with a specific ID (for agents spawned elsewhere)
+    pub async fn register_with_id(
+        &self,
+        id: Uuid,
+        role: &str,
+        name: Option<&str>,
+        config: serde_json::Value,
+    ) -> Result<()> {
         sqlx::query(
             r"
             INSERT INTO agents (id, role, name, config)
             VALUES ($1, $2, $3, $4)
+            ON CONFLICT (id) DO UPDATE SET
+                role = EXCLUDED.role,
+                name = EXCLUDED.name,
+                config = EXCLUDED.config,
+                updated_at = NOW()
             ",
         )
         .bind(id)
@@ -170,10 +186,10 @@ impl AgentRepository {
         .bind(&config)
         .execute(&self.pool)
         .await
-        .context("Failed to create agent")?;
+        .context("Failed to register agent")?;
 
-        debug!("Created agent {} with role {}", id, role);
-        Ok(id)
+        debug!("Registered agent {} with role {}", id, role);
+        Ok(())
     }
 
     /// Get an agent by ID
