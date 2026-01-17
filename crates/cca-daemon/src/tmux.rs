@@ -1,7 +1,7 @@
 //! Tmux integration for auto-spawning agent workers
 //!
 //! Manages agent workers in tmux windows with 2x2 pane layouts.
-//! Maximum 2 windows ("Auto CCA", "Auto CCA #2") = 8 agent slots.
+//! Maximum 2 windows ("CCA-Workers", "CCA-Workers-2") = 8 agent slots.
 
 use std::collections::HashMap;
 use std::process::Command;
@@ -41,7 +41,7 @@ impl TmuxManager {
         if tmux_available {
             info!("Tmux detected - auto-spawn feature enabled");
         } else {
-            warn!("Tmux not detected - auto-spawn feature disabled");
+            warn!("Tmux not available - auto-spawn feature disabled");
         }
 
         Self {
@@ -51,9 +51,26 @@ impl TmuxManager {
         }
     }
 
-    /// Check if we're running inside tmux
+    /// Check if tmux is available
     fn check_tmux_available() -> bool {
-        std::env::var("TMUX").is_ok()
+        // First check if we're inside a tmux session
+        if std::env::var("TMUX").is_ok() {
+            return true;
+        }
+
+        // Not inside tmux, but check if tmux server is running and has sessions
+        let output = Command::new("tmux")
+            .args(["list-sessions", "-F", "#{session_name}"])
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                // Check if there's at least one session
+                stdout.lines().any(|s| !s.trim().is_empty())
+            }
+            _ => false,
+        }
     }
 
     /// Check if tmux auto-spawn is available
@@ -95,9 +112,9 @@ impl TmuxManager {
         let window_index = spawned / PANES_PER_WINDOW;
         let pane_in_window = spawned % PANES_PER_WINDOW;
         let window_name = if window_index == 0 {
-            "Auto CCA".to_string()
+            "CCA-Workers".to_string()
         } else {
-            format!("Auto CCA #{}", window_index + 1)
+            format!("CCA-Workers-{}", window_index + 1)
         };
 
         // Create window if needed
@@ -139,10 +156,51 @@ impl TmuxManager {
         Ok(pane_id)
     }
 
+    /// Get the current tmux session name
+    /// Re-detects each time to handle session changes
+    fn get_current_session(&self) -> Option<String> {
+        // If inside tmux, use current session
+        if std::env::var("TMUX").is_ok() {
+            return None; // Use current session (no prefix needed)
+        }
+
+        // Otherwise get the first available session
+        let output = Command::new("tmux")
+            .args(["list-sessions", "-F", "#{session_name}"])
+            .output()
+            .ok()?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout.lines().next().map(|s| s.trim().to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Get the target specifier for tmux commands
+    /// Returns "session:window" or just ":window" if in current session
+    fn window_target(&self, window_name: &str) -> String {
+        match self.get_current_session() {
+            Some(session) => format!("{}:{}", session, window_name),
+            None => format!(":{}", window_name),
+        }
+    }
+
     /// Create a new tmux window
     fn create_window(&self, name: &str) -> Result<(), String> {
+        let mut args = vec!["new-window", "-n", name, "-d"];
+
+        // Get current session dynamically
+        let target;
+        if let Some(session) = self.get_current_session() {
+            target = format!("{}:", session);
+            args.push("-t");
+            args.push(&target);
+        }
+
         let output = Command::new("tmux")
-            .args(["new-window", "-n", name, "-d"])
+            .args(&args)
             .output()
             .map_err(|e| format!("Failed to create tmux window: {e}"))?;
 
@@ -161,38 +219,45 @@ impl TmuxManager {
 
     /// Set up 2x2 pane layout in a window
     fn setup_window_layout(&self, window_name: &str) -> Result<(), String> {
+        let target = self.window_target(window_name);
+
         // Split horizontally first (creates 2 panes side by side)
-        let _ = Command::new("tmux")
-            .args(["split-window", "-h", "-t", &format!(":{window_name}")])
+        let output = Command::new("tmux")
+            .args(["split-window", "-h", "-t", &target])
             .output();
+        if let Ok(out) = &output {
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                warn!("split-window -h failed: {}", stderr);
+            }
+        }
 
         // Split each pane vertically (creates 4 panes in 2x2)
-        let _ = Command::new("tmux")
-            .args([
-                "split-window",
-                "-v",
-                "-t",
-                &format!(":{window_name}.0"),
-            ])
+        let target_pane0 = format!("{}.0", target);
+        let output = Command::new("tmux")
+            .args(["split-window", "-v", "-t", &target_pane0])
             .output();
+        if let Ok(out) = &output {
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                warn!("split-window -v pane 0 failed: {}", stderr);
+            }
+        }
 
-        let _ = Command::new("tmux")
-            .args([
-                "split-window",
-                "-v",
-                "-t",
-                &format!(":{window_name}.2"),
-            ])
+        let target_pane2 = format!("{}.2", target);
+        let output = Command::new("tmux")
+            .args(["split-window", "-v", "-t", &target_pane2])
             .output();
+        if let Ok(out) = &output {
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                warn!("split-window -v pane 2 failed: {}", stderr);
+            }
+        }
 
         // Select tiled layout for even distribution
         let _ = Command::new("tmux")
-            .args([
-                "select-layout",
-                "-t",
-                &format!(":{window_name}"),
-                "tiled",
-            ])
+            .args(["select-layout", "-t", &target, "tiled"])
             .output();
 
         debug!("Set up 2x2 layout for window: {}", window_name);
@@ -201,14 +266,9 @@ impl TmuxManager {
 
     /// Get the first pane ID of a window
     fn get_window_pane(&self, window_name: &str) -> Result<String, String> {
+        let target = self.window_target(window_name);
         let output = Command::new("tmux")
-            .args([
-                "list-panes",
-                "-t",
-                &format!(":{window_name}"),
-                "-F",
-                "#{pane_id}",
-            ])
+            .args(["list-panes", "-t", &target, "-F", "#{pane_id}"])
             .output()
             .map_err(|e| format!("Failed to list panes: {e}"))?;
 
@@ -230,15 +290,10 @@ impl TmuxManager {
 
     /// Create a new pane by splitting
     fn create_pane(&self, window_name: &str, pane_index: usize) -> Result<String, String> {
+        let target = self.window_target(window_name);
         // The layout is already set up, just get the pane at the index
         let output = Command::new("tmux")
-            .args([
-                "list-panes",
-                "-t",
-                &format!(":{window_name}"),
-                "-F",
-                "#{pane_id}",
-            ])
+            .args(["list-panes", "-t", &target, "-F", "#{pane_id}"])
             .output()
             .map_err(|e| format!("Failed to list panes: {e}"))?;
 
@@ -320,10 +375,16 @@ impl TmuxManager {
         // Kill the windows we created
         let windows = self.windows.read().await;
         for window in windows.iter() {
+            let target = self.window_target(window);
             let _ = Command::new("tmux")
-                .args(["kill-window", "-t", &format!(":{window}")])
+                .args(["kill-window", "-t", &target])
                 .output();
         }
+    }
+
+    /// Get the target session name (for status reporting)
+    pub fn target_session(&self) -> Option<String> {
+        self.get_current_session()
     }
 }
 

@@ -1023,6 +1023,7 @@ async fn get_status(State(state): State<DaemonState>) -> Json<serde_json::Value>
         "tasks_completed": completed,
         "tmux": {
             "available": state.tmux_manager.is_available(),
+            "target_session": state.tmux_manager.target_session(),
             "auto_spawned_agents": tmux_agents_info
         },
         "embeddings": embeddings_info
@@ -1805,14 +1806,26 @@ async fn create_task(
 
     // Build context with system prompt and available workers
     let workers_info = if available_roles.is_empty() {
-        "IMPORTANT: No specialist workers are currently connected. \
-         You MUST return an error response telling the user to start the required worker(s).\n\
-         Example: {\"action\":\"error\",\"error\":\"No workers available. Start required workers with: cca agent worker <role>\",\"required_workers\":[\"backend\"]}".to_string()
+        if state.tmux_manager.is_available() {
+            // Tmux available - allow delegation, workers will be auto-spawned
+            "No workers are currently connected, but auto-spawn is enabled. \
+             You may delegate to any role (backend, frontend, devops, dba, security, qa) and workers will be spawned automatically.".to_string()
+        } else {
+            "IMPORTANT: No specialist workers are currently connected. \
+             You MUST return an error response telling the user to start the required worker(s).\n\
+             Example: {\"action\":\"error\",\"error\":\"No workers available. Start required workers with: cca agent worker <role>\",\"required_workers\":[\"backend\"]}".to_string()
+        }
     } else {
+        let auto_spawn_note = if state.tmux_manager.is_available() {
+            " Additional workers can be auto-spawned if needed."
+        } else {
+            ""
+        };
         format!(
-            "Available workers: {}. Only delegate to these roles. \
+            "Available workers: {}.{} \
              If a required role is not available, return an error response listing the missing workers.",
-            available_roles.join(", ")
+            available_roles.join(", "),
+            auto_spawn_note
         )
     };
     let context = format!("{COORDINATOR_SYSTEM_PROMPT}\n\n{workers_info}");
