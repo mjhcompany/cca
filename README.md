@@ -55,7 +55,7 @@ graph TB
 ```
 ## CCA Code Visualization
 
-<!-- To embed video: Edit this file on GitHub, drag-drop cca-code-vis.mp4 here, replace this comment with the generated URL -->
+https://github.com/user-attachments/assets/0581d1b9-55e0-4629-8574-a1c3c16609f7
 
 ## Features
 
